@@ -48,8 +48,12 @@ class ChannelAPITests(APITestCase):
         self.client.force_authenticate(self.other_user)
         detail_url = f"{self.list_url}{self.channel.pk}/"
         self.assertEqual(self.client.get(detail_url).status_code, status.HTTP_404_NOT_FOUND)
+        response = self.client.patch(detail_url, {"title": "Stolen"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(self.client.delete(detail_url).status_code, status.HTTP_404_NOT_FOUND)
         self.assertTrue(Channel.objects.filter(pk=self.channel.pk).exists())
+        self.channel.refresh_from_db()
+        self.assertEqual(self.channel.title, "Example channel")
 
     def test_owner_can_update_and_delete_a_channel(self):
         self.client.force_authenticate(self.owner)

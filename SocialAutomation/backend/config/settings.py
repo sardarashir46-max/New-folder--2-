@@ -138,6 +138,22 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
+    'DEFAULT_THROTTLE_RATES': {
+        'login_ip': '20/minute',
+        'login_username': '5/minute',
+    },
+}
+
+# Login throttles use Django's cache. LocMem is convenient for one local server;
+# multi-worker deployments should point these settings at a shared cache service.
+CACHES = {
+    'default': {
+        'BACKEND': os.environ.get(
+            'DJANGO_CACHE_BACKEND',
+            'django.core.cache.backends.locmem.LocMemCache',
+        ),
+        'LOCATION': os.environ.get('DJANGO_CACHE_LOCATION', 'socialautomation-auth-throttle'),
+    }
 }
 
 CORS_ALLOWED_ORIGINS = [

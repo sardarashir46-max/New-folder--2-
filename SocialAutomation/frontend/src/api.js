@@ -7,6 +7,7 @@ export async function apiFetch(path, options = {}) {
   if (!["GET", "HEAD", "OPTIONS", "TRACE"].includes(method)) {
     const csrfResponse = await fetch(`${API_BASE_URL}/api/auth/csrf/`, {
       credentials: "include",
+      signal: options.signal,
     });
     if (!csrfResponse.ok) throw new Error("Could not start a secure request. Please retry.");
     const { csrfToken } = await csrfResponse.json();

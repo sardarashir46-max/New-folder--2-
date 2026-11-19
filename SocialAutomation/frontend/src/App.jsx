@@ -35,7 +35,7 @@ function StatCard({ label, value, change, icon: Icon, tone }) {
   );
 }
 
-function Dashboard({ user, onLogout, logoutLoading, logoutError }) {
+function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutError }) {
   const [active, setActive] = useState("Overview");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -47,8 +47,12 @@ function Dashboard({ user, onLogout, logoutLoading, logoutError }) {
   useEffect(() => {
     const controller = new AbortController();
     setChannelsLoading(true);
-    apiFetch("/api/channels/")
+    apiFetch("/api/channels/", { signal: controller.signal })
       .then(async (response) => {
+        if (response.status === 401 || response.status === 403) {
+          onSessionExpired();
+          throw new Error("Your session has expired. Please sign in again.");
+        }
         if (!response.ok) throw new Error(await responseError(response));
         return response.json();
       })
@@ -221,13 +225,13 @@ function App() {
   const [logoutLoading, setLogoutLoading] = useState(false);
   const [logoutError, setLogoutError] = useState("");
 
-  async function checkSession() {
+  async function checkSession(signal) {
     setCheckingSession(true);
     setSessionError("");
     try {
-      const csrfResponse = await apiFetch("/api/auth/csrf/");
+      const csrfResponse = await apiFetch("/api/auth/csrf/", { signal });
       if (!csrfResponse.ok) throw new Error("The authentication service is unavailable.");
-      const response = await apiFetch("/api/auth/me/");
+      const response = await apiFetch("/api/auth/me/", { signal });
       if (response.status === 401 || response.status === 403) {
         setUser(null);
       } else if (!response.ok) {
@@ -236,13 +240,19 @@ function App() {
         setUser((await response.json()).user);
       }
     } catch (error) {
-      setSessionError(error.message || "The authentication service is unavailable.");
+      if (error.name !== "AbortError") {
+        setSessionError(error.message || "The authentication service is unavailable.");
+      }
     } finally {
-      setCheckingSession(false);
+      if (!signal?.aborted) setCheckingSession(false);
     }
   }
 
-  useEffect(() => { checkSession(); }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    checkSession(controller.signal);
+    return () => controller.abort();
+  }, []);
 
   async function handleLogout() {
     setLogoutLoading(true);
@@ -262,9 +272,9 @@ function App() {
     return <main className="auth-shell"><div className="auth-loading"><span className="live-dot" /> Checking your session…</div></main>;
   }
   if (sessionError) {
-    return <main className="auth-shell"><div className="auth-card auth-unavailable"><h1>Can't reach your workspace</h1><p>{sessionError}</p><button className="primary-button" onClick={checkSession}>Try again</button></div></main>;
+    return <main className="auth-shell"><div className="auth-card auth-unavailable"><h1>Can't reach your workspace</h1><p>{sessionError}</p><button className="primary-button" onClick={() => checkSession()}>Try again</button></div></main>;
   }
-  return user ? <Dashboard user={user} onLogout={handleLogout} logoutLoading={logoutLoading} logoutError={logoutError} /> : <AuthScreen onAuthenticated={setUser} />;
+  return user ? <Dashboard user={user} onLogout={handleLogout} onSessionExpired={() => setUser(null)} logoutLoading={logoutLoading} logoutError={logoutError} /> : <AuthScreen onAuthenticated={setUser} />;
 }
 
 export default App;
