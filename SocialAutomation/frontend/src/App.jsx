@@ -1,5 +1,7 @@
 import React from 'react';
 import { useEffect, useState } from "react";
+import AuthScreen from "./AuthScreen";
+import { apiFetch, responseError } from "./api";
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, CalendarDays,
   CheckCircle2, ChevronDown, CircleHelp, Clock3, Facebook,
@@ -33,7 +35,7 @@ function StatCard({ label, value, change, icon: Icon, tone }) {
   );
 }
 
-function App() {
+function Dashboard({ user, onLogout, logoutLoading, logoutError }) {
   const [active, setActive] = useState("Overview");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -43,36 +45,18 @@ function App() {
   const [channelsError, setChannelsError] = useState("");
 
   useEffect(() => {
-    if (active !== "YouTube channels") return;
-
     const controller = new AbortController();
-    const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
     setChannelsLoading(true);
-    setChannelsError("");
-
-    fetch(`${apiBaseUrl}/api/channels/`, {
-      credentials: "include",
-      signal: controller.signal,
-    })
+    apiFetch("/api/channels/")
       .then(async (response) => {
-        if (!response.ok) {
-          if (response.status === 401 || response.status === 403) {
-            throw new Error("Sign in to view your channels. The API requires an authenticated session.");
-          }
-          throw new Error("Channels could not be loaded. Please try again.");
-        }
+        if (!response.ok) throw new Error(await responseError(response));
         return response.json();
       })
       .then((data) => setChannels(Array.isArray(data) ? data : data.results || []))
-      .catch((error) => {
-        if (error.name !== "AbortError") setChannelsError(error.message);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setChannelsLoading(false);
-      });
-
+      .catch((error) => { if (error.name !== "AbortError") setChannelsError(error.message); })
+      .finally(() => { if (!controller.signal.aborted) setChannelsLoading(false); });
     return () => controller.abort();
-  }, [active]);
+  }, []);
 
   const title = active === "Overview" ? "Command center" : active;
   const descriptions = {
@@ -124,7 +108,7 @@ function App() {
           </div>
           <button className="nav-item" onClick={() => showNotice("Settings will be available in a later phase.")}><Settings2 size={18}/><span>Settings</span></button>
           <button className="nav-item" onClick={() => showNotice("Help center is coming soon.")}><CircleHelp size={18}/><span>Help & support</span></button>
-          <div className="profile-row"><div className="profile-avatar">A</div><div className="profile-copy"><strong>Workspace owner</strong><span>Administrator</span></div><MoreHorizontal size={18} className="muted"/></div>
+          <div className="profile-row"><div className="profile-avatar">{user.username.slice(0, 1).toUpperCase()}</div><div className="profile-copy"><strong>{user.username}</strong><span>{user.email || "Workspace member"}</span></div><button className="logout-button" onClick={onLogout} disabled={logoutLoading}>{logoutLoading ? "Signing out…" : "Log out"}</button></div>
         </div>
       </aside>
 
@@ -137,7 +121,7 @@ function App() {
           <div className="topbar-actions">
             <label className="search-box"><Search size={16}/><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search anything..." /></label>
             <button className="icon-button notification-button" onClick={() => showNotice("You're all caught up.")} aria-label="Notifications"><Bell size={18}/><i/></button>
-            <div className="top-avatar">A</div>
+            <div className="top-avatar">{user.username.slice(0, 1).toUpperCase()}</div>
           </div>
         </header>
 
@@ -225,8 +209,62 @@ function App() {
         </div>
       </main>
       {notice && <div className="toast"><CheckCircle2 size={17}/>{notice}</div>}
+      {logoutError && <div className="toast toast-error" role="alert">{logoutError}</div>}
     </div>
   );
+}
+
+function App() {
+  const [user, setUser] = useState(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [sessionError, setSessionError] = useState("");
+  const [logoutLoading, setLogoutLoading] = useState(false);
+  const [logoutError, setLogoutError] = useState("");
+
+  async function checkSession() {
+    setCheckingSession(true);
+    setSessionError("");
+    try {
+      const csrfResponse = await apiFetch("/api/auth/csrf/");
+      if (!csrfResponse.ok) throw new Error("The authentication service is unavailable.");
+      const response = await apiFetch("/api/auth/me/");
+      if (response.status === 401 || response.status === 403) {
+        setUser(null);
+      } else if (!response.ok) {
+        throw new Error(await responseError(response));
+      } else {
+        setUser((await response.json()).user);
+      }
+    } catch (error) {
+      setSessionError(error.message || "The authentication service is unavailable.");
+    } finally {
+      setCheckingSession(false);
+    }
+  }
+
+  useEffect(() => { checkSession(); }, []);
+
+  async function handleLogout() {
+    setLogoutLoading(true);
+    setLogoutError("");
+    try {
+      const response = await apiFetch("/api/auth/logout/", { method: "POST" });
+      if (!response.ok) throw new Error(await responseError(response));
+      setUser(null);
+    } catch (error) {
+      setLogoutError(error.message || "Sign out failed. Please retry.");
+    } finally {
+      setLogoutLoading(false);
+    }
+  }
+
+  if (checkingSession) {
+    return <main className="auth-shell"><div className="auth-loading"><span className="live-dot" /> Checking your session…</div></main>;
+  }
+  if (sessionError) {
+    return <main className="auth-shell"><div className="auth-card auth-unavailable"><h1>Can't reach your workspace</h1><p>{sessionError}</p><button className="primary-button" onClick={checkSession}>Try again</button></div></main>;
+  }
+  return user ? <Dashboard user={user} onLogout={handleLogout} logoutLoading={logoutLoading} logoutError={logoutError} /> : <AuthScreen onAuthenticated={setUser} />;
 }
 
 export default App;
