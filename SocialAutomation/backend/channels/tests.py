@@ -124,3 +124,27 @@ class ChannelAPITests(APITestCase):
         response = self.client.get(f"{self.list_url}{self.channel.pk}/videos/")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertTrue(DiscoveredVideo.objects.filter(pk=video.pk).exists())
+
+    def test_same_video_can_be_discovered_for_two_different_channels(self):
+        other_channel = Channel.objects.create(
+            owner=self.other_user,
+            channel_id="UC-other",
+            title="Other channel",
+        )
+        first = DiscoveredVideo.objects.create(
+            channel=self.channel,
+            video_id="sharedvideo01",
+            title="Shared public video",
+            video_url="https://www.youtube.com/watch?v=sharedvideo01",
+        )
+        second = DiscoveredVideo.objects.create(
+            channel=other_channel,
+            video_id="sharedvideo01",
+            title="Shared public video",
+            video_url="https://www.youtube.com/watch?v=sharedvideo01",
+        )
+        self.assertNotEqual(first.pk, second.pk)
+        self.assertEqual(
+            DiscoveredVideo.objects.filter(video_id="sharedvideo01").count(),
+            2,
+        )
