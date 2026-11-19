@@ -53,9 +53,9 @@ class ChannelViewSet(viewsets.ModelViewSet):
                 if published_at:
                     published_at = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
                 DiscoveredVideo.objects.update_or_create(
+                    channel=channel,
                     video_id=item["video_id"],
                     defaults={
-                        "channel": channel,
                         "title": item["title"],
                         "description": item["description"],
                         "thumbnail_url": item["thumbnail_url"],
