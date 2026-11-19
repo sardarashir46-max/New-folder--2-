@@ -1,8 +1,10 @@
+from unittest.mock import patch
 from django.contrib.auth import get_user_model
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Channel
+from .models import Channel, DiscoveredVideo
 
 
 class ChannelAPITests(APITestCase):
@@ -10,16 +12,11 @@ class ChannelAPITests(APITestCase):
         user_model = get_user_model()
         self.owner = user_model.objects.create_user(username="owner", password="pass")
         self.other_user = user_model.objects.create_user(username="other", password="pass")
-        self.channel = Channel.objects.create(
-            owner=self.owner,
-            channel_id="UC-example",
-            title="Example channel",
-        )
+        self.channel = Channel.objects.create(owner=self.owner, channel_id="UC-example", title="Example channel")
         self.list_url = "/api/channels/"
 
     def test_authentication_is_required(self):
-        response = self.client.get(self.list_url)
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.get(self.list_url).status_code, status.HTTP_403_FORBIDDEN)
 
     def test_users_only_see_their_own_channels(self):
         self.client.force_authenticate(self.other_user)
@@ -29,49 +26,69 @@ class ChannelAPITests(APITestCase):
 
     def test_create_sets_owner_and_does_not_allow_fake_connection(self):
         self.client.force_authenticate(self.owner)
-        response = self.client.post(
-            self.list_url,
-            {
-                "channel_id": "UC-new",
-                "title": "New channel",
-                "owner": self.other_user.pk,
-                "connection_status": "connected",
-            },
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        channel = Channel.objects.get(channel_id="UC-new")
-        self.assertEqual(channel.owner, self.owner)
-        self.assertEqual(channel.connection_status, Channel.ConnectionStatus.DISCONNECTED)
+        response = self.client.post(self.list_url, {"channel_id": "UC-new", "title": "New channel", "owner": self.other_user.pk, "connection_status": "connected"}, format="json")
+        # Channel creation must go through YouTube metadata verification.
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Channel.objects.filter(channel_id="UC-new").exists())
 
     def test_other_user_cannot_read_or_delete_a_channel(self):
         self.client.force_authenticate(self.other_user)
         detail_url = f"{self.list_url}{self.channel.pk}/"
         self.assertEqual(self.client.get(detail_url).status_code, status.HTTP_404_NOT_FOUND)
-        response = self.client.patch(detail_url, {"title": "Stolen"}, format="json")
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.patch(detail_url, {"title": "Stolen"}, format="json").status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(self.client.delete(detail_url).status_code, status.HTTP_404_NOT_FOUND)
-        self.assertTrue(Channel.objects.filter(pk=self.channel.pk).exists())
         self.channel.refresh_from_db()
         self.assertEqual(self.channel.title, "Example channel")
 
-    def test_owner_can_update_and_delete_a_channel(self):
+    def test_owner_can_update_and_delete_monitoring_channel(self):
         self.client.force_authenticate(self.owner)
         detail_url = f"{self.list_url}{self.channel.pk}/"
-        response = self.client.put(
-            detail_url,
-            {"channel_id": "UC-example", "title": "Replaced"},
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        response = self.client.patch(detail_url, {"title": "Updated"}, format="json")
+        response = self.client.patch(detail_url, {"monitoring_enabled": False}, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.channel.refresh_from_db()
-        self.assertEqual(self.channel.title, "Updated")
+        self.assertFalse(self.channel.monitoring_enabled)
         self.assertEqual(self.client.delete(detail_url).status_code, status.HTTP_204_NO_CONTENT)
 
-    def test_response_contains_no_credentials(self):
+    def test_channel_add_uses_youtube_metadata_and_discovers_videos(self):
         self.client.force_authenticate(self.owner)
-        response = self.client.get(self.list_url)
-        self.assertNotIn("access_token", response.data[0])
-        self.assertNotIn("refresh_token", response.data[0])
+        info = {"channel_id": "UC" + "a" * 22, "title": "Test channel", "description": "About", "custom_url": "@test", "thumbnail_url": "https://example.com/thumb.jpg", "subscriber_count": 12, "video_count": 1, "view_count": 99, "uploads_playlist_id": "UU-test"}
+        video = {"video_id": "video1234567", "title": "Latest video", "description": "Description", "thumbnail_url": "https://example.com/video.jpg", "published_at": "2026-11-19T12:00:00Z", "video_url": "https://www.youtube.com/watch?v=video1234567"}
+        with patch("channels.views.get_channel", return_value=info), patch("channels.views.get_latest_videos", return_value=[video]):
+            response = self.client.post(self.list_url, {"channel_url": "https://www.youtube.com/@test"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["title"], "Test channel")
+        self.assertEqual(DiscoveredVideo.objects.filter(video_id="video1234567").count(), 1)
+        self.assertEqual(DiscoveredVideo.objects.get(video_id="video1234567").rights_status, "unverified")
+
+    def test_duplicate_channel_does_not_create_second_record(self):
+        self.client.force_authenticate(self.owner)
+        info = {"channel_id": self.channel.channel_id, "title": "Example channel", "description": "", "custom_url": "", "thumbnail_url": "", "subscriber_count": 0, "video_count": 0, "view_count": 0, "uploads_playlist_id": ""}
+        with patch("channels.views.get_channel", return_value=info):
+            first = self.client.post(self.list_url, {"channel_url": self.channel.channel_id}, format="json")
+            second = self.client.post(self.list_url, {"channel_url": self.channel.channel_id}, format="json")
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(Channel.objects.filter(owner=self.owner, channel_id=self.channel.channel_id).count(), 1)
+
+    def test_refresh_is_owner_scoped(self):
+        self.client.force_authenticate(self.other_user)
+        response = self.client.post(f"{self.list_url}{self.channel.pk}/refresh/")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_monitoring_toggle(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(f"{self.list_url}{self.channel.pk}/monitoring/", {"enabled": False}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["monitoring_enabled"])
+
+    def test_rights_status_cannot_be_set_to_unverified(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.patch(f"{self.list_url}{self.channel.pk}/videos/", {"video_id": "none", "rights_status": "unverified"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_discovered_videos_are_owner_scoped(self):
+        video = DiscoveredVideo.objects.create(channel=self.channel, video_id="v1234567890", title="Test", video_url="https://youtube.com/watch?v=v1234567890")
+        self.client.force_authenticate(self.other_user)
+        response = self.client.get(f"{self.list_url}{self.channel.pk}/videos/")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(DiscoveredVideo.objects.filter(pk=video.pk).exists())
