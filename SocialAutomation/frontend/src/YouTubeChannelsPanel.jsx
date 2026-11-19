@@ -196,7 +196,7 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
       <div className="panel-heading channel-panel-heading">
         <div>
           <h3>Your YouTube channels</h3>
-          <p>Add a public channel to load its metadata and recent video details.</p>
+          <p>Add public channel metadata and manually refresh its latest video details. Automatic background checks are not enabled yet.</p>
         </div>
         <span className="channel-total">{channels.length} {channels.length === 1 ? "channel" : "channels"}</span>
       </div>
@@ -249,7 +249,7 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
                     {numberText(channel.subscriber_count)} subscribers · {numberText(channel.video_count)} videos · {numberText(channel.view_count)} views
                   </small>
                   <span className={`channel-monitoring ${channel.monitoring_enabled ? "monitoring-on" : "monitoring-off"}`}>
-                    {channel.monitoring_enabled ? "Monitoring active" : "Monitoring paused"}
+                    {channel.monitoring_enabled ? "Monitoring preference on" : "Monitoring preference off"}
                   </span>
                 </div>
                 <div className="channel-actions">
