@@ -38,7 +38,7 @@ class DiscoveredVideo(models.Model):
         REJECTED = "rejected", "Not approved"
 
     channel = models.ForeignKey(Channel, on_delete=models.CASCADE, related_name="videos")
-    video_id = models.CharField(max_length=32, unique=True)
+    video_id = models.CharField(max_length=32)
     title = models.CharField(max_length=500)
     description = models.TextField(blank=True)
     thumbnail_url = models.URLField(max_length=1000, blank=True)
@@ -49,6 +49,9 @@ class DiscoveredVideo(models.Model):
 
     class Meta:
         ordering = ["-published_at", "-discovered_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["channel", "video_id"], name="unique_video_per_channel"),
+        ]
 
     def __str__(self):
         return self.title
