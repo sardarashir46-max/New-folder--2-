@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'channels',
     'accounts',
+    'facebook',
 ]
 
 MIDDLEWARE = [
@@ -170,6 +171,22 @@ CELERY_BEAT_SCHEDULE = (
     if YOUTUBE_MONITORING_ENABLED
     else {}
 )
+
+# Facebook Login and Graph API are configured per environment. App credentials
+# are intentionally optional at startup so the rest of Django remains usable.
+FACEBOOK_APP_ID = os.environ.get('FACEBOOK_APP_ID', '').strip()
+FACEBOOK_APP_SECRET = os.environ.get('FACEBOOK_APP_SECRET', '').strip()
+FACEBOOK_REDIRECT_URI = os.environ.get(
+    'FACEBOOK_REDIRECT_URI',
+    'http://localhost:8000/api/facebook/oauth/callback/',
+).strip()
+FACEBOOK_FRONTEND_URL = os.environ.get(
+    'FACEBOOK_FRONTEND_URL',
+    'http://localhost:5173',
+).strip()
+FACEBOOK_GRAPH_API_VERSION = os.environ.get('FACEBOOK_GRAPH_API_VERSION', 'v27.0').strip()
+FACEBOOK_TOKEN_ENCRYPTION_KEY = os.environ.get('FACEBOOK_TOKEN_ENCRYPTION_KEY', '').strip()
+FACEBOOK_LOGIN_SCOPES = ('pages_show_list', 'pages_read_engagement')
 
 # Login throttles use Django's cache. LocMem is convenient for one local server;
 # multi-worker deployments should point these settings at a shared cache service.
