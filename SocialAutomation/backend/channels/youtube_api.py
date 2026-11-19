@@ -38,8 +38,12 @@ def _channel_lookup(value):
     if re.fullmatch(r"UC[a-zA-Z0-9_-]{22}", value):
         return {"id": value}
     parsed = urlparse(value if "://" in value else f"https://www.youtube.com/{value.lstrip('/')}")
-    if parsed.netloc and not (parsed.netloc.endswith("youtube.com") or parsed.netloc.endswith("youtu.be")):
+    allowed_hosts = {"youtube.com", "www.youtube.com", "m.youtube.com"}
+    host = (parsed.hostname or "").lower()
+    if parsed.netloc and host not in allowed_hosts:
         raise YouTubeAPIError("Enter a YouTube channel URL, @handle, or channel ID.")
+    if "://" in value and not host:
+        raise YouTubeAPIError("Enter a valid YouTube channel URL.")
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) >= 2 and parts[0] == "channel" and re.fullmatch(r"UC[a-zA-Z0-9_-]{22}", parts[1]):
         return {"id": parts[1]}
