@@ -155,6 +155,20 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
     );
   }
 
+  async function updateRightsStatus(channel, video, rightsStatus) {
+    try {
+      const updated = await request(`${CHANNELS_URL}${channel.id}/videos/`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ video_id: video.video_id, rights_status: rightsStatus }),
+      });
+      setVideos((current) => current.map((item) => item.id === updated.id ? updated : item));
+      onNotice("Rights status saved as your own attestation.");
+    } catch (error) {
+      setVideosError(error.message || "Could not save the rights status.");
+    }
+  }
+
   async function viewVideos(channel) {
     setSelectedChannel(channel);
     setVideos([]);
@@ -262,7 +276,7 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
         <div className="video-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeVideos(); }}>
           <section className="video-dialog" role="dialog" aria-modal="true" aria-labelledby="channel-videos-title">
             <header className="video-dialog-heading">
-              <div><h2 id="channel-videos-title">Videos from {selectedChannel.title}</h2><p>Video metadata only. Open videos on YouTube to watch them.</p></div>
+              <div><h2 id="channel-videos-title">Videos from {selectedChannel.title}</h2><p>Metadata only. Rights labels are your own declarations, not independently verified proof or a licence.</p></div>
               <button className="icon-button" type="button" onClick={closeVideos} aria-label="Close videos"><X size={18} /></button>
             </header>
             {videosLoading ? (
@@ -279,6 +293,19 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
                     <div className="discovered-video-details">
                       <strong>{video.title}</strong>
                       <span>{dateText(video.published_at)}</span>
+                      <span className={`rights-status rights-${video.rights_status}`}>Rights: {video.rights_status}</span>
+                      <label className="rights-select-label">
+                        Your rights review
+                        <select
+                          value={video.rights_status}
+                          onChange={(event) => updateRightsStatus(selectedChannel, video, event.target.value)}
+                        >
+                          <option value="unverified">Not reviewed</option>
+                          <option value="owned">I own this content</option>
+                          <option value="authorized">I have redistribution permission</option>
+                          <option value="rejected">Do not use this video</option>
+                        </select>
+                      </label>
                     </div>
                     <a className="channel-action-button youtube-video-link" href={video.video_url || `https://www.youtube.com/watch?v=${video.video_id}`} target="_blank" rel="noreferrer" aria-label={`Open ${video.title} on YouTube`}>
                       <ExternalLink size={15} /><span>Open on YouTube</span>
