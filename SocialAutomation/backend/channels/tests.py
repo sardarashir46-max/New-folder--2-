@@ -5,6 +5,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from .models import Channel, DiscoveredVideo
+from .youtube_api import YouTubeAPIError, _channel_lookup
 
 
 class ChannelAPITests(APITestCase):
@@ -14,6 +15,20 @@ class ChannelAPITests(APITestCase):
         self.other_user = user_model.objects.create_user(username="other", password="pass")
         self.channel = Channel.objects.create(owner=self.owner, channel_id="UC-example", title="Example channel")
         self.list_url = "/api/channels/"
+
+    def test_channel_lookup_accepts_handles_and_official_youtube_hosts(self):
+        self.assertEqual(_channel_lookup("@sample"), {"forHandle": "@sample"})
+        self.assertEqual(_channel_lookup("https://www.youtube.com/@sample"), {"forHandle": "@sample"})
+        self.assertEqual(_channel_lookup("https://m.youtube.com/@sample"), {"forHandle": "@sample"})
+
+    def test_channel_lookup_rejects_lookalike_hosts(self):
+        for value in (
+            "https://evil-youtube.com/@sample",
+            "https://youtube.com.attacker.example/@sample",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(YouTubeAPIError):
+                    _channel_lookup(value)
 
     def test_authentication_is_required(self):
         self.assertEqual(self.client.get(self.list_url).status_code, status.HTTP_403_FORBIDDEN)
@@ -85,6 +100,23 @@ class ChannelAPITests(APITestCase):
         self.client.force_authenticate(self.owner)
         response = self.client.patch(f"{self.list_url}{self.channel.pk}/videos/", {"video_id": "none", "rights_status": "unverified"}, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_owner_can_record_a_rights_attestation(self):
+        video = DiscoveredVideo.objects.create(
+            channel=self.channel,
+            video_id="rights123456",
+            title="Rights review test",
+            video_url="https://www.youtube.com/watch?v=rights123456",
+        )
+        self.client.force_authenticate(self.owner)
+        response = self.client.patch(
+            f"{self.list_url}{self.channel.pk}/videos/",
+            {"video_id": video.video_id, "rights_status": "authorized"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        video.refresh_from_db()
+        self.assertEqual(video.rights_status, "authorized")
 
     def test_discovered_videos_are_owner_scoped(self):
         video = DiscoveredVideo.objects.create(channel=self.channel, video_id="v1234567890", title="Test", video_url="https://youtube.com/watch?v=v1234567890")
