@@ -147,7 +147,7 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
               </section>
             </>
           ) : active === "YouTube channels" ? (
-            <YouTubeChannelsPanel onSessionExpired={() => setUser(null)} onNotice={showNotice} />
+            <YouTubeChannelsPanel onSessionExpired={onSessionExpired} onNotice={showNotice} />
           ) : (
             <section className="panel section-placeholder">
               <div className="placeholder-icon">{active === "YouTube channels" ? <Youtube/> : active === "Facebook Pages" ? <Facebook/> : active === "Media library" ? <FileVideo2/> : active === "Publishing calendar" ? <CalendarDays/> : <Activity/>}</div>
