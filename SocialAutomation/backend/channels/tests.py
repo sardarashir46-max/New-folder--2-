@@ -1,11 +1,18 @@
+import io
+import json
+from urllib.error import HTTPError
 from unittest.mock import patch
 from django.contrib.auth import get_user_model
+from django.test import SimpleTestCase, TestCase
 from django.test import override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from .models import Channel, DiscoveredVideo
-from .youtube_api import YouTubeAPIError, _channel_lookup
+from .services import check_channel
+from .tasks import enqueue_enabled_channel_checks, monitor_channel
+from .youtube_api import RetryableYouTubeAPIError, YouTubeAPIError, _api_get, _channel_lookup
 
 
 class ChannelAPITests(APITestCase):
@@ -148,3 +155,198 @@ class ChannelAPITests(APITestCase):
             DiscoveredVideo.objects.filter(video_id="sharedvideo01").count(),
             2,
         )
+
+    def test_monitoring_summary_is_scoped_to_signed_in_user(self):
+        self.channel.last_checked_at = timezone.now()
+        self.channel.save(update_fields=["last_checked_at"])
+        DiscoveredVideo.objects.create(
+            channel=self.channel,
+            video_id="ownvideo12345",
+            title="My discovered video",
+            video_url="https://www.youtube.com/watch?v=ownvideo12345",
+        )
+        other_channel = Channel.objects.create(
+            owner=self.other_user,
+            channel_id="UC-other",
+            title="Other user's channel",
+        )
+        DiscoveredVideo.objects.create(
+            channel=other_channel,
+            video_id="othervideo12345",
+            title="Other user's video",
+            video_url="https://www.youtube.com/watch?v=othervideo12345",
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(f"{self.list_url}monitoring-summary/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["total_channels"], 1)
+        self.assertEqual(response.data["active_monitoring_channels"], 1)
+        self.assertEqual(response.data["total_discovered_videos"], 1)
+        self.assertEqual(response.data["latest_videos"][0]["title"], "My discovered video")
+
+    def test_monitoring_summary_reports_global_service_disabled(self):
+        self.client.force_authenticate(self.owner)
+        with override_settings(YOUTUBE_MONITORING_ENABLED=False):
+            response = self.client.get(f"{self.list_url}monitoring-summary/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["monitoring_service_enabled"])
+        self.assertEqual(response.data["active_monitoring_channels"], 0)
+
+
+class ChannelMonitoringTaskTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="monitor-owner",
+            password="pass",
+        )
+        self.enabled_channel = Channel.objects.create(
+            owner=self.user,
+            channel_id="UC-enabled",
+            title="Enabled channel",
+        )
+        self.disabled_channel = Channel.objects.create(
+            owner=self.user,
+            channel_id="UC-disabled",
+            title="Disabled channel",
+            monitoring_enabled=False,
+        )
+
+    @patch("channels.tasks.monitor_channel.apply_async")
+    def test_dispatcher_queues_enabled_channels_only(self, apply_async):
+        with override_settings(YOUTUBE_MONITOR_INTERVAL_SECONDS=300):
+            enqueue_enabled_channel_checks.run()
+
+        apply_async.assert_called_once_with(args=(self.enabled_channel.pk,), expires=300)
+
+    @patch("channels.tasks.monitor_channel.apply_async")
+    def test_global_setting_can_disable_dispatch(self, apply_async):
+        with override_settings(YOUTUBE_MONITORING_ENABLED=False):
+            queued = enqueue_enabled_channel_checks.run()
+
+        self.assertEqual(queued, 0)
+        apply_async.assert_not_called()
+
+    @patch("channels.tasks.check_channel")
+    def test_global_setting_can_disable_queued_channel_task(self, check_channel_mock):
+        with override_settings(YOUTUBE_MONITORING_ENABLED=False):
+            result = monitor_channel.run(self.enabled_channel.pk)
+
+        self.assertEqual(result["reason"], "monitoring_service_disabled")
+        check_channel_mock.assert_not_called()
+
+    @patch("channels.services.get_latest_videos")
+    @patch("channels.services.get_channel")
+    def test_check_saves_metadata_once_and_updates_last_success(self, get_channel, get_latest_videos):
+        get_channel.return_value = {
+            "channel_id": self.enabled_channel.channel_id,
+            "title": "Updated title",
+            "description": "Updated description",
+            "custom_url": "@enabled",
+            "thumbnail_url": "https://example.com/channel.jpg",
+            "subscriber_count": 8,
+            "video_count": 1,
+            "view_count": 24,
+            "uploads_playlist_id": "uploads-enabled",
+        }
+        get_latest_videos.return_value = [{
+            "video_id": "monitorvideo123",
+            "title": "New public upload",
+            "description": "Video metadata",
+            "thumbnail_url": "https://example.com/video.jpg",
+            "published_at": "2026-11-20T10:30:00Z",
+            "video_url": "https://www.youtube.com/watch?v=monitorvideo123",
+        }]
+
+        result = check_channel(self.enabled_channel.pk)
+        video = DiscoveredVideo.objects.get(channel=self.enabled_channel)
+        video.rights_status = DiscoveredVideo.RightsStatus.AUTHORIZED
+        video.save(update_fields=["rights_status"])
+        check_channel(self.enabled_channel.pk)
+
+        self.enabled_channel.refresh_from_db()
+        video.refresh_from_db()
+        self.assertEqual(result["status"], "checked")
+        self.assertEqual(result["videos_saved"], 1)
+        self.assertEqual(self.enabled_channel.title, "Updated title")
+        self.assertIsNotNone(self.enabled_channel.last_checked_at)
+        self.assertEqual(DiscoveredVideo.objects.filter(channel=self.enabled_channel).count(), 1)
+        self.assertEqual(video.rights_status, DiscoveredVideo.RightsStatus.AUTHORIZED)
+        self.assertEqual(get_latest_videos.call_count, 2)
+
+    @patch("channels.services.get_channel")
+    def test_disabled_channel_is_skipped_without_youtube_request(self, get_channel):
+        result = check_channel(self.disabled_channel.pk)
+
+        self.assertEqual(result["status"], "skipped")
+        get_channel.assert_not_called()
+        self.assertIsNone(self.disabled_channel.last_checked_at)
+
+    @patch("channels.tasks.check_channel", side_effect=RetryableYouTubeAPIError("temporary"))
+    @patch.object(monitor_channel, "retry", side_effect=Exception("retry requested"))
+    def test_temporary_api_errors_trigger_celery_retry(self, retry, check):
+        with self.assertRaisesRegex(Exception, "retry requested"):
+            monitor_channel.run(self.enabled_channel.pk)
+
+        retry.assert_called_once()
+        self.assertEqual(monitor_channel.autoretry_for, (RetryableYouTubeAPIError,))
+        self.assertTrue(monitor_channel.retry_backoff)
+        self.assertEqual(check.call_count, 1)
+
+    @patch("channels.tasks.check_channel", side_effect=YouTubeAPIError("bad API key"))
+    @patch.object(monitor_channel, "retry")
+    def test_permanent_api_errors_are_not_retried(self, retry, check):
+        result = monitor_channel.run(self.enabled_channel.pk)
+
+        self.assertEqual(result["status"], "error")
+        retry.assert_not_called()
+        check.assert_called_once()
+
+    @patch("channels.services.get_latest_videos", side_effect=RetryableYouTubeAPIError("temporarily unavailable"))
+    @patch("channels.services.get_channel")
+    def test_failed_check_does_not_advance_last_success_time(self, get_channel, get_latest_videos):
+        get_channel.return_value = {
+            "channel_id": self.enabled_channel.channel_id,
+            "title": self.enabled_channel.title,
+            "uploads_playlist_id": "uploads-enabled",
+        }
+
+        with self.assertRaises(RetryableYouTubeAPIError):
+            check_channel(self.enabled_channel.pk)
+
+        self.enabled_channel.refresh_from_db()
+        self.assertIsNone(self.enabled_channel.last_checked_at)
+        self.assertFalse(DiscoveredVideo.objects.filter(channel=self.enabled_channel).exists())
+
+
+class YouTubeAPIErrorClassificationTests(SimpleTestCase):
+    @patch("channels.youtube_api.urlopen")
+    def test_quota_error_is_classified_for_retry(self, urlopen):
+        body = json.dumps({"error": {"errors": [{"reason": "quotaExceeded"}]}}).encode()
+        urlopen.side_effect = HTTPError(
+            "https://www.googleapis.com/youtube/v3/channels",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(body),
+        )
+        with patch.dict("os.environ", {"YOUTUBE_API_KEY": "test-key"}):
+            with self.assertRaises(RetryableYouTubeAPIError):
+                _api_get("channels", {"part": "snippet"})
+
+    @patch("channels.youtube_api.urlopen")
+    def test_permanent_permission_error_is_not_classified_for_retry(self, urlopen):
+        body = json.dumps({"error": {"errors": [{"reason": "forbidden"}]}}).encode()
+        urlopen.side_effect = HTTPError(
+            "https://www.googleapis.com/youtube/v3/channels",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(body),
+        )
+        with patch.dict("os.environ", {"YOUTUBE_API_KEY": "test-key"}):
+            with self.assertRaises(YouTubeAPIError) as error:
+                _api_get("channels", {"part": "snippet"})
+        self.assertNotIsInstance(error.exception, RetryableYouTubeAPIError)

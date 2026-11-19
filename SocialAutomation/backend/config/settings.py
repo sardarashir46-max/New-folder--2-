@@ -144,6 +144,33 @@ REST_FRAMEWORK = {
     },
 }
 
+# Celery Beat periodically dispatches one lightweight task per enabled channel.
+# The worker, not a web request, performs all YouTube API calls.
+YOUTUBE_MONITORING_ENABLED = os.environ.get(
+    'YOUTUBE_MONITORING_ENABLED', 'True'
+).lower() in ('true', '1', 'yes')
+YOUTUBE_MONITOR_INTERVAL_SECONDS = max(
+    60,
+    int(os.environ.get('YOUTUBE_MONITOR_INTERVAL_SECONDS', '900')),
+)
+CELERY_BROKER_URL = os.environ.get(
+    'CELERY_BROKER_URL',
+    os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/0'),
+)
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_DEFAULT_QUEUE = 'socialautomation'
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_BEAT_SCHEDULE = (
+    {
+        'enqueue-enabled-youtube-channel-checks': {
+            'task': 'channels.tasks.enqueue_enabled_channel_checks',
+            'schedule': YOUTUBE_MONITOR_INTERVAL_SECONDS,
+        },
+    }
+    if YOUTUBE_MONITORING_ENABLED
+    else {}
+)
+
 # Login throttles use Django's cache. LocMem is convenient for one local server;
 # multi-worker deployments should point these settings at a shared cache service.
 CACHES = {

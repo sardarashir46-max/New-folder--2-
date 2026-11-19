@@ -14,6 +14,10 @@ class YouTubeAPIError(Exception):
     pass
 
 
+class RetryableYouTubeAPIError(YouTubeAPIError):
+    """A temporary network, server, rate-limit, or quota condition."""
+
+
 def _api_get(endpoint, params):
     key = os.environ.get("YOUTUBE_API_KEY", "").strip()
     if not key:
@@ -24,13 +28,30 @@ def _api_get(endpoint, params):
         with urlopen(request, timeout=12) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
+        error_code = ""
+        try:
+            error_body = json.loads(exc.read().decode("utf-8"))
+            error_code = error_body.get("error", {}).get("errors", [{}])[0].get("reason", "")
+        except (ValueError, AttributeError, IndexError, TypeError):
+            pass
+        if error_code in {
+            "quotaExceeded",
+            "dailyLimitExceeded",
+            "rateLimitExceeded",
+            "userRateLimitExceeded",
+        }:
+            raise RetryableYouTubeAPIError(
+                "YouTube API quota or rate limit was reached; monitoring will retry later."
+            ) from exc
         if exc.code == 404:
             raise YouTubeAPIError("YouTube could not find that channel or video.") from exc
         if exc.code == 403:
             raise YouTubeAPIError("YouTube API access was denied. Check API enablement, key restrictions and quota.") from exc
+        if exc.code == 408 or exc.code == 429 or exc.code >= 500:
+            raise RetryableYouTubeAPIError("YouTube API is temporarily unavailable; monitoring will retry.") from exc
         raise YouTubeAPIError("YouTube API request failed. Please try again later.") from exc
     except (URLError, TimeoutError, ValueError) as exc:
-        raise YouTubeAPIError("Could not reach YouTube. Please try again.") from exc
+        raise RetryableYouTubeAPIError("Could not reach YouTube; monitoring will retry.") from exc
 
 
 def _channel_lookup(value):

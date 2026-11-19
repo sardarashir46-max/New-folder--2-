@@ -1,5 +1,6 @@
-from datetime import datetime
+from django.conf import settings
 from django.utils import timezone
+from django.db.models import Max
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -7,6 +8,7 @@ from rest_framework.response import Response
 
 from .models import Channel, DiscoveredVideo
 from .serializers import ChannelSerializer, DiscoveredVideoSerializer
+from .services import save_discovered_videos
 from .youtube_api import YouTubeAPIError, get_channel, get_latest_videos
 
 
@@ -15,7 +17,7 @@ class ChannelViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Channel.objects.filter(owner=self.request.user).prefetch_related("videos")
+        return Channel.objects.filter(owner=self.request.user)
 
     def create(self, request, *args, **kwargs):
         channel_url = request.data.get("channel_url") or request.data.get("channel_id", "")
@@ -48,26 +50,37 @@ class ChannelViewSet(viewsets.ModelViewSet):
             except YouTubeAPIError:
                 return
         try:
-            for item in get_latest_videos(uploads_playlist_id):
-                published_at = item.get("published_at")
-                if published_at:
-                    published_at = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-                DiscoveredVideo.objects.update_or_create(
-                    channel=channel,
-                    video_id=item["video_id"],
-                    defaults={
-                        "title": item["title"],
-                        "description": item["description"],
-                        "thumbnail_url": item["thumbnail_url"],
-                        "published_at": published_at,
-                        "video_url": item["video_url"],
-                    },
-                )
+            video_items = get_latest_videos(uploads_playlist_id)
+            save_discovered_videos(channel, video_items)
             channel.last_checked_at = timezone.now()
             channel.save(update_fields=["last_checked_at", "updated_at"])
         except YouTubeAPIError:
             # Keep the channel record; the UI can retry discovery later.
             return
+
+    @action(detail=False, methods=["get"], url_path="monitoring-summary")
+    def monitoring_summary(self, request):
+        """Return dashboard totals and recent video metadata for this user only."""
+        channels = self.get_queryset()
+        latest_videos = DiscoveredVideo.objects.filter(
+            channel__owner=request.user,
+        ).select_related("channel")[:5]
+        return Response({
+            "total_channels": channels.count(),
+            "monitoring_service_enabled": settings.YOUTUBE_MONITORING_ENABLED,
+            "active_monitoring_channels": (
+                channels.filter(monitoring_enabled=True).count()
+                if settings.YOUTUBE_MONITORING_ENABLED
+                else 0
+            ),
+            "total_discovered_videos": DiscoveredVideo.objects.filter(
+                channel__owner=request.user,
+            ).count(),
+            "last_successful_check_at": channels.aggregate(
+                last_checked=Max("last_checked_at"),
+            )["last_checked"],
+            "latest_videos": DiscoveredVideoSerializer(latest_videos, many=True).data,
+        })
 
     @action(detail=True, methods=["post"])
     def refresh(self, request, pk=None):

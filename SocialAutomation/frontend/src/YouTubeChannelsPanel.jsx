@@ -27,6 +27,13 @@ function dateText(value) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
 }
 
+function dateTimeText(value) {
+  if (!value) return "No successful check yet";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "No successful check yet";
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
 function handleText(channel) {
   if (!channel.custom_url) return channel.channel_id;
   return channel.custom_url.startsWith("@") ? channel.custom_url : `@${channel.custom_url}`;
@@ -36,6 +43,9 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
   const [channels, setChannels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [summary, setSummary] = useState(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [summaryError, setSummaryError] = useState("");
   const [channelUrl, setChannelUrl] = useState("");
   const [adding, setAdding] = useState(false);
   const [actionError, setActionError] = useState("");
@@ -56,8 +66,8 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
     return response.json();
   }
 
-  async function loadChannels(signal) {
-    setLoading(true);
+  async function loadChannels(signal, quiet = false) {
+    if (!quiet) setLoading(true);
     setLoadError("");
     try {
       const data = await request(CHANNELS_URL, { signal });
@@ -65,14 +75,35 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
     } catch (error) {
       if (error.name !== "AbortError" && !signal?.aborted) setLoadError(error.message);
     } finally {
-      if (!signal?.aborted) setLoading(false);
+      if (!quiet && !signal?.aborted) setLoading(false);
+    }
+  }
+
+  async function loadSummary(signal, quiet = false) {
+    if (!quiet) setSummaryLoading(true);
+    setSummaryError("");
+    try {
+      const data = await request(`${CHANNELS_URL}monitoring-summary/`, { signal });
+      if (!signal?.aborted) setSummary(data);
+    } catch (error) {
+      if (error.name !== "AbortError" && !signal?.aborted) setSummaryError(error.message);
+    } finally {
+      if (!quiet && !signal?.aborted) setSummaryLoading(false);
     }
   }
 
   useEffect(() => {
     const controller = new AbortController();
     loadChannels(controller.signal);
-    return () => controller.abort();
+    loadSummary(controller.signal);
+    const pollId = window.setInterval(() => {
+      loadChannels(undefined, true);
+      loadSummary(undefined, true);
+    }, 60000);
+    return () => {
+      controller.abort();
+      window.clearInterval(pollId);
+    };
   }, []);
 
   async function addChannel(event) {
@@ -90,6 +121,7 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
       });
       setChannels((current) => [channel, ...current.filter((item) => item.id !== channel.id)]);
       setChannelUrl("");
+      loadSummary();
       onNotice("YouTube channel details loaded successfully.");
     } catch (error) {
       setActionError(error.message || "Could not add this channel. Please try again.");
@@ -110,6 +142,7 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
       } else if (updated) {
         setChannels((current) => current.map((item) => item.id === channel.id ? updated : item));
       }
+      loadSummary();
       onNotice(successMessage);
     } catch (error) {
       setActionError(error.message || "That channel action could not be completed.");
@@ -196,7 +229,7 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
       <div className="panel-heading channel-panel-heading">
         <div>
           <h3>Your YouTube channels</h3>
-          <p>Add public channel metadata and manually refresh its latest video details. Automatic background checks are not enabled yet.</p>
+          <p>Add public channel metadata and manage automatic background checks.</p>
         </div>
         <span className="channel-total">{channels.length} {channels.length === 1 ? "channel" : "channels"}</span>
       </div>
@@ -221,6 +254,22 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
         <p className="channel-form-hint">Channel details come from YouTube’s public metadata API. No Google account is connected.</p>
       </form>
 
+      <section className="monitoring-overview" aria-label="YouTube monitoring overview">
+        <article className="monitoring-stat"><span>Selected channels</span><strong>{summaryLoading ? "..." : summary?.total_channels ?? channels.length}</strong></article>
+        <article className="monitoring-stat"><span>Monitoring active</span><strong>{summaryLoading ? "..." : summary?.active_monitoring_channels ?? 0}</strong></article>
+        <article className="monitoring-stat"><span>Discovered videos</span><strong>{summaryLoading ? "..." : numberText(summary?.total_discovered_videos)}</strong></article>
+        <article className="monitoring-stat monitoring-last-check"><span>Last successful check</span><strong>{summaryLoading ? "Loading..." : dateTimeText(summary?.last_successful_check_at)}</strong></article>
+      </section>
+      {summary?.monitoring_service_enabled === false && (
+        <div className="channel-inline-error" role="status">Automatic monitoring is disabled by the server configuration. Your channel preferences are saved and will take effect when the service is enabled.</div>
+      )}
+      {summaryError && (
+        <div className="channel-inline-error" role="alert">
+          <span>Monitoring summary could not be loaded: {summaryError}</span>
+          <button className="subtle-button" type="button" onClick={() => loadSummary()}>Retry summary</button>
+        </div>
+      )}
+
       {actionError && <div className="channel-inline-error" role="alert">{actionError}</div>}
       {loading ? (
         <div className="channels-message" role="status"><LoaderCircle className="spin" size={18} /> Loading your channels…</div>
@@ -239,6 +288,7 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
         <div className="channel-list">
           {channels.map((channel) => {
             const busy = busyAction.startsWith(`${channel.id}:`);
+            const isMonitoring = channel.monitoring_enabled && summary?.monitoring_service_enabled !== false;
             return (
               <article className="channel-card channel-management-card" key={channel.id}>
                 {channel.thumbnail_url ? <img src={channel.thumbnail_url} alt={`${channel.title} thumbnail`} loading="lazy" /> : <div className="channel-thumbnail"><Youtube size={21} /></div>}
@@ -248,9 +298,10 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
                   <small>
                     {numberText(channel.subscriber_count)} subscribers · {numberText(channel.video_count)} videos · {numberText(channel.view_count)} views
                   </small>
-                  <span className={`channel-monitoring ${channel.monitoring_enabled ? "monitoring-on" : "monitoring-off"}`}>
-                    {channel.monitoring_enabled ? "Monitoring preference on" : "Monitoring preference off"}
+                  <span className={`channel-monitoring ${isMonitoring ? "monitoring-on" : "monitoring-off"}`}>
+                    {summary?.monitoring_service_enabled === false ? "Monitoring service disabled" : channel.monitoring_enabled ? "Monitoring active" : "Monitoring paused"}
                   </span>
+                  <span className="channel-last-check">Last checked: {dateTimeText(channel.last_checked_at)}</span>
                 </div>
                 <div className="channel-actions">
                   <button className="channel-action-button" type="button" onClick={() => refreshChannel(channel)} disabled={Boolean(busyAction)} title="Refresh channel" aria-label={`Refresh ${channel.title}`}>
@@ -271,6 +322,27 @@ export default function YouTubeChannelsPanel({ onSessionExpired, onNotice }) {
           })}
         </div>
       )}
+
+      <section className="latest-discoveries">
+        <div className="panel-heading"><div><h3>Latest discovered videos</h3><p>Public video metadata only. A rights status is your declaration, not verified permission.</p></div></div>
+        {summaryLoading ? (
+          <div className="channels-message latest-loading" role="status"><LoaderCircle className="spin" size={17} /> Loading recent discoveries...</div>
+        ) : summary?.latest_videos?.length ? (
+          <div className="discovered-video-list">
+            {summary.latest_videos.map((video) => (
+              <article className="discovered-video-card" key={video.id}>
+                {video.thumbnail_url ? <img src={video.thumbnail_url} alt="" loading="lazy" /> : <div className="video-thumbnail-fallback"><Youtube size={20} /></div>}
+                <div className="discovered-video-details"><strong>{video.title}</strong><span>{video.channel_title} · {dateText(video.published_at)}</span><span className={`rights-status rights-${video.rights_status}`}>Your rights declaration: {video.rights_status}</span></div>
+                <a className="channel-action-button youtube-video-link" href={video.video_url} target="_blank" rel="noreferrer"><ExternalLink size={15} /><span>Open on YouTube</span></a>
+              </article>
+            ))}
+          </div>
+        ) : summaryError ? (
+          <div className="channels-message channels-error latest-loading" role="alert">Recent discoveries are unavailable.</div>
+        ) : (
+          <div className="channels-message latest-loading">No public videos have been discovered yet.</div>
+        )}
+      </section>
 
       {selectedChannel && (
         <div className="video-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeVideos(); }}>
