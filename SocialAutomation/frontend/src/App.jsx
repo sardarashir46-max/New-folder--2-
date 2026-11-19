@@ -1,6 +1,7 @@
 import React from 'react';
 import { useEffect, useState } from "react";
 import AuthScreen from "./AuthScreen";
+import YouTubeChannelsPanel from "./YouTubeChannelsPanel";
 import { apiFetch, responseError } from "./api";
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, CalendarDays,
@@ -40,28 +41,6 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
   const [mobileOpen, setMobileOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [notice, setNotice] = useState("");
-  const [channels, setChannels] = useState([]);
-  const [channelsLoading, setChannelsLoading] = useState(false);
-  const [channelsError, setChannelsError] = useState("");
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setChannelsLoading(true);
-    apiFetch("/api/channels/", { signal: controller.signal })
-      .then(async (response) => {
-        if (response.status === 401 || response.status === 403) {
-          onSessionExpired();
-          throw new Error("Your session has expired. Please sign in again.");
-        }
-        if (!response.ok) throw new Error(await responseError(response));
-        return response.json();
-      })
-      .then((data) => setChannels(Array.isArray(data) ? data : data.results || []))
-      .catch((error) => { if (error.name !== "AbortError") setChannelsError(error.message); })
-      .finally(() => { if (!controller.signal.aborted) setChannelsLoading(false); });
-    return () => controller.abort();
-  }, []);
-
   const title = active === "Overview" ? "Command center" : active;
   const descriptions = {
     "Overview": "Your content operations, all in one place.",
@@ -132,7 +111,7 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
         <div className="page-content">
           <section className="page-heading">
             <div><div className="eyebrow"><span className="live-dot"/> WORKSPACE OVERVIEW</div><h1>{title}</h1><p>{descriptions[active]}</p></div>
-            <button className="primary-button" onClick={() => showNotice("Connect an account in the Accounts setup phase.")}><Plus size={17}/> Connect account</button>
+            {active !== "YouTube channels" && <button className="primary-button" onClick={() => showNotice("Connect an account in the Accounts setup phase.")}><Plus size={17}/> Connect account</button>}
           </section>
 
           {active === "Overview" ? (
@@ -168,39 +147,7 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
               </section>
             </>
           ) : active === "YouTube channels" ? (
-            <section className="panel channels-panel">
-              <div className="panel-heading">
-                <div><h3>Your YouTube channels</h3><p>Channel details are loaded from your authenticated account.</p></div>
-              </div>
-              {channelsLoading ? (
-                <div className="channels-message" role="status">Loading your channels…</div>
-              ) : channelsError ? (
-                <div className="channels-message channels-error" role="alert">
-                  <strong>Unable to load channels</strong><span>{channelsError}</span>
-                </div>
-              ) : channels.length === 0 ? (
-                <div className="channels-message">
-                  <div className="placeholder-icon"><Youtube /></div>
-                  <strong>No channels yet</strong>
-                  <span>Channels will appear here after they are added through an authorized connection.</span>
-                  <button className="subtle-button" onClick={() => showNotice("YouTube authorization will be added in a later milestone.")}>Connection setup coming later</button>
-                </div>
-              ) : (
-                <div className="channel-list">
-                  {channels.map((channel) => (
-                    <article className="channel-card" key={channel.id}>
-                      {channel.thumbnail_url ? <img src={channel.thumbnail_url} alt="" /> : <div className="channel-thumbnail"><Youtube size={21} /></div>}
-                      <div className="channel-details">
-                        <strong>{channel.title}</strong>
-                        <span>{channel.custom_url || channel.channel_id}</span>
-                        <small>{Number(channel.subscriber_count || 0).toLocaleString()} subscribers · {Number(channel.video_count || 0).toLocaleString()} videos · {Number(channel.view_count || 0).toLocaleString()} views</small>
-                      </div>
-                      <span className={`channel-status ${channel.connection_status === "connected" ? "is-connected" : ""}`}>{channel.connection_status}</span>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </section>
+            <YouTubeChannelsPanel onSessionExpired={() => setUser(null)} onNotice={showNotice} />
           ) : (
             <section className="panel section-placeholder">
               <div className="placeholder-icon">{active === "YouTube channels" ? <Youtube/> : active === "Facebook Pages" ? <Facebook/> : active === "Media library" ? <FileVideo2/> : active === "Publishing calendar" ? <CalendarDays/> : <Activity/>}</div>
