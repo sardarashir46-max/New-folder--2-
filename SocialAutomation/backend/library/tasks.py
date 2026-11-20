@@ -13,6 +13,7 @@ from .services import (
     FacebookPublishingService,
     PermanentPublishingError,
     TemporaryPublishingError,
+    UncertainPublishingError,
     validate_target_is_still_authorized,
 )
 
@@ -43,7 +44,7 @@ def _queue_post(post_id, queued_at):
 @shared_task(ignore_result=True)
 def dispatch_due_scheduled_posts():
     """Claim due posts once and enqueue them without doing publishing in a request."""
-    if not settings.PUBLISHING_DISPATCH_ENABLED:
+    if not settings.PUBLISHING_ENABLED or not settings.PUBLISHING_DISPATCH_ENABLED:
         return 0
     now = timezone.now()
     stale_before = now - timedelta(seconds=settings.PUBLISHING_DISPATCH_STALE_SECONDS)
@@ -100,6 +101,10 @@ def _refresh_post_status(post_id):
     if not statuses:
         post.status = ScheduledPost.Status.FAILED
         post.last_error = 'This scheduled post has no available Page targets.'
+    elif any(value == ScheduledPostTarget.Status.REVIEW_REQUIRED for value in statuses):
+        post.status = ScheduledPost.Status.REVIEW_REQUIRED
+        errors = list(post.targets.exclude(last_error='').values_list('last_error', flat=True)[:1])
+        post.last_error = errors[0] if errors else 'Review Page activity before taking further action.'
     elif any(value in (ScheduledPostTarget.Status.PENDING, ScheduledPostTarget.Status.PROCESSING) for value in statuses):
         post.status = ScheduledPost.Status.PROCESSING
     elif all(value == ScheduledPostTarget.Status.PUBLISHED for value in statuses):
@@ -123,6 +128,8 @@ def _refresh_post_status(post_id):
 @shared_task(bind=True, max_retries=4, ignore_result=True)
 def process_scheduled_post(self, post_id):
     """Run page targets independently; duplicate deliveries cannot claim a target twice."""
+    if not settings.PUBLISHING_ENABLED:
+        return
     try:
         with transaction.atomic():
             post = ScheduledPost.objects.select_for_update().filter(pk=post_id).first()
@@ -205,6 +212,15 @@ def process_scheduled_post(self, post_id):
                     break
             except PermanentPublishingError as error:
                 _finish_attempt(attempt, target, status=PublishingAttempt.Status.FAILED, error=str(error)[:1000])
+            except UncertainPublishingError as error:
+                now = timezone.now()
+                target.status = ScheduledPostTarget.Status.REVIEW_REQUIRED
+                target.last_error = str(error)[:1000]
+                target.save(update_fields=['status', 'last_error', 'updated_at'])
+                attempt.status = PublishingAttempt.Status.UNCERTAIN
+                attempt.error = target.last_error
+                attempt.finished_at = now
+                attempt.save(update_fields=['status', 'error', 'finished_at'])
             except Exception:
                 # Never log an arbitrary third-party exception: it could contain credentials.
                 _finish_attempt(
@@ -234,3 +250,32 @@ def process_scheduled_post(self, post_id):
             last_error='Publishing stopped after the configured retry limit.',
             updated_at=timezone.now(),
         )
+
+
+@shared_task(ignore_result=True)
+def recover_stale_processing_targets():
+    """A crashed worker may have sent the request; require review instead of reposting."""
+    cutoff = timezone.now() - timedelta(seconds=settings.PUBLISHING_DISPATCH_STALE_SECONDS)
+    stale = ScheduledPostTarget.objects.filter(
+        status=ScheduledPostTarget.Status.PROCESSING,
+        updated_at__lte=cutoff,
+    ).select_related('post')
+    post_ids = set()
+    for target in stale:
+        now = timezone.now()
+        changed = ScheduledPostTarget.objects.filter(pk=target.pk, status=ScheduledPostTarget.Status.PROCESSING).update(
+            status=ScheduledPostTarget.Status.REVIEW_REQUIRED,
+            last_error='Worker stopped during publishing. Check the Facebook Page before retrying.',
+            updated_at=now,
+        )
+        if changed:
+            attempt = target.attempts.filter(status=PublishingAttempt.Status.PROCESSING).first()
+            if attempt:
+                attempt.status = PublishingAttempt.Status.UNCERTAIN
+                attempt.error = 'Worker stopped during publishing. Publication outcome requires review.'
+                attempt.finished_at = now
+                attempt.save(update_fields=['status', 'error', 'finished_at'])
+            post_ids.add(target.post_id)
+    for post_id in post_ids:
+        _refresh_post_status(post_id)
+    return len(post_ids)

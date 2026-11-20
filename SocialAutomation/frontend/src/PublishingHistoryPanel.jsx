@@ -5,6 +5,7 @@ import { apiFetch, responseError } from "./api";
 const labels = {
   pending: "Pending", queued: "Queued", processing: "Processing", published: "Published",
   partial: "Partially published", failed: "Failed", cancelled: "Cancelled",
+  review_required: "Review required", uncertain: "Outcome uncertain",
 };
 
 export default function PublishingHistoryPanel({ onSessionExpired }) {
@@ -49,7 +50,7 @@ export default function PublishingHistoryPanel({ onSessionExpired }) {
 
   return <section className="panel activity-history-panel">
     <div className="panel-heading"><div><h3>Publishing activity</h3><p>Scheduled posts and each Page publishing attempt.</p></div><span className="channel-status">{attempts.length} attempts</span></div>
-    <div className="history-disabled-note"><AlertCircle size={15}/><span>Facebook publishing is disabled. Failed entries state that no content was sent. No post is marked Published without Meta confirmation.</span></div>
+    <div className="history-disabled-note"><AlertCircle size={15}/><span>Only confirmed Meta responses are marked Published. Review required means checking Page activity before any retry.</span></div>
     <div className="history-filter-row"><label htmlFor="history-status">Status</label><select id="history-status" value={filter} onChange={event => setFilter(event.target.value)}><option value="">All statuses</option>{Object.entries(labels).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></div>
     {error && <div className="library-message error" role="alert"><AlertCircle size={15}/>{error}</div>}
     {loading ? <div className="library-loading"><LoaderCircle size={18} className="spin"/> Loading activity…</div> : filteredPosts.length === 0 ? <div className="library-empty"><Clock3 size={25}/><strong>No publishing activity</strong><span>Scheduled posts and attempts will appear here.</span></div> : <div className="history-list">{filteredPosts.map(post => (

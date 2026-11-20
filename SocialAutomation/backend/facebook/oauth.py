@@ -175,11 +175,6 @@ def get_granted_permissions(access_token):
         for item in data.get('data', [])
         if item.get('status') == 'granted'
     }
-    missing = set(settings.FACEBOOK_LOGIN_SCOPES) - granted
-    if missing:
-        raise FacebookPermissionMissing(
-            'The required Facebook Page permissions were not granted. Reconnect and approve them.'
-        )
     return sorted(granted)
 
 

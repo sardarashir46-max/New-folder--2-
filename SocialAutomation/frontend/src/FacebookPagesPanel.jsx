@@ -9,6 +9,7 @@ const callbackMessages = {
   "auth-required": ["Sign in again before connecting Facebook.", "error"],
   "configuration-error": ["Facebook Login is not configured on this server yet.", "error"],
   "connection-error": ["Facebook could not complete the connection. Check permissions and try again.", "error"],
+  "permissions-missing": ["Meta did not grant all required permissions. Publishing requires pages_show_list, pages_read_engagement, and pages_manage_posts. Reconnect and approve them; Meta app review or access may be required.", "error"],
   "callback-error": ["Facebook returned an incomplete response. Please reconnect.", "error"],
 };
 
@@ -123,9 +124,10 @@ export default function FacebookPagesPanel({ onSessionExpired, callbackStatus })
         <div><h3>Facebook Page access</h3><p>Connect through Meta and choose Pages you manage.</p></div>
         <span className={`channel-status ${connected ? "is-connected" : ""}`}>{connection?.status || "Not connected"}</span>
       </div>
-      <div className="facebook-security-note"><ShieldCheck size={16}/><span>Official Meta authorization. Only Page list and engagement read permissions are requested. No posts are published.</span></div>
+      <div className="facebook-security-note"><ShieldCheck size={16}/><span>Official Meta authorization. Publishing requires pages_show_list, pages_read_engagement, and pages_manage_posts. Tokens remain encrypted on the server.</span></div>
       {notice && <div className={`facebook-message ${noticeType}`} role="status">{noticeType === "error" ? <AlertCircle size={15}/> : <Check size={15}/>}<span>{notice}</span></div>}
       {error && <div className="facebook-message error" role="alert"><AlertCircle size={15}/><span>{error}</span></div>}
+      {connection?.publishing_enabled && connection.requires_reconnection && <div className="facebook-message error" role="status"><AlertCircle size={15}/><span>Reconnect Facebook and grant all publishing permissions before publishing.</span></div>}
 
       <div className="facebook-toolbar">
         {!connected ? (
@@ -150,6 +152,7 @@ export default function FacebookPagesPanel({ onSessionExpired, callbackStatus })
           <article className="facebook-page-card" key={page.id}>
             {page.picture_url ? <img src={page.picture_url} alt="" referrerPolicy="no-referrer"/> : <div className="facebook-page-placeholder"><Facebook size={18}/></div>}
             <div className="facebook-page-copy"><strong>{page.name}</strong><span>{page.category || "Facebook Page"} · ID {page.page_id}</span><span className={`facebook-selected-label ${page.selected ? "selected" : ""}`}>{page.selected ? "Selected" : "Not selected"}</span></div>
+            <span className={`facebook-selected-label ${page.can_create_content ? "selected" : ""}`}>{page.can_create_content ? "Can create content" : "CREATE_CONTENT unavailable"}</span>
             <a className="facebook-open-link" href={`https://www.facebook.com/${encodeURIComponent(page.page_id)}`} target="_blank" rel="noreferrer" aria-label={`Open ${page.name} on Facebook`}><ExternalLink size={15}/></a>
             <button className={page.selected ? "subtle-button facebook-selection selected" : "subtle-button facebook-selection"} disabled={busyPage === page.id || bulkUpdating || !page.available} onClick={() => changeSelection(page, !page.selected)}>
               {busyPage === page.id ? <LoaderCircle size={14} className="spin"/> : page.selected ? "Deselect" : "Select"}
@@ -157,7 +160,7 @@ export default function FacebookPagesPanel({ onSessionExpired, callbackStatus })
           </article>
         ))}</div>
       )}
-      <p className="facebook-rights-note">Page selection records your preference. It does not verify ownership or grant permission to publish. Publishing is not enabled in this milestone.</p>
+      <p className="facebook-rights-note">Page selection records your preference. Publishing also requires CREATE_CONTENT task access and Meta granted permissions.</p>
     </section>
   );
 }

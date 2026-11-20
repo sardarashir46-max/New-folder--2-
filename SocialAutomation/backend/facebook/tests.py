@@ -36,7 +36,7 @@ TEST_FERNET_KEY = Fernet.generate_key().decode('ascii')
     FACEBOOK_FRONTEND_URL='http://localhost:5173',
     FACEBOOK_GRAPH_API_VERSION='v27.0',
     FACEBOOK_TOKEN_ENCRYPTION_KEY=TEST_FERNET_KEY,
-    FACEBOOK_LOGIN_SCOPES=('pages_show_list', 'pages_read_engagement'),
+    FACEBOOK_LOGIN_SCOPES=('pages_show_list', 'pages_read_engagement', 'pages_manage_posts'),
 )
 class FacebookIntegrationTests(APITestCase):
     def setUp(self):
@@ -61,7 +61,7 @@ class FacebookIntegrationTests(APITestCase):
             facebook_user_id='fb-user-100',
             token_expires_at=expires_at or timezone.now() + timedelta(days=30),
             status=status_value,
-            granted_permissions=['pages_show_list', 'pages_read_engagement'],
+            granted_permissions=['pages_show_list', 'pages_read_engagement', 'pages_manage_posts'],
         )
         account.set_access_token(token)
         account.save()
@@ -93,7 +93,7 @@ class FacebookIntegrationTests(APITestCase):
         self.assertEqual(parsed.netloc, 'www.facebook.com')
         self.assertIn('/v27.0/dialog/oauth', parsed.path)
         self.assertEqual(query['response_type'], ['code'])
-        self.assertEqual(query['scope'], ['pages_show_list,pages_read_engagement'])
+        self.assertEqual(query['scope'], ['pages_show_list,pages_read_engagement,pages_manage_posts'])
         self.assertTrue(query['state'][0])
         self.assertEqual(self.client.session[OAUTH_STATE_SESSION_KEY], query['state'][0])
         self.assertIn(OAUTH_STATE_CREATED_SESSION_KEY, self.client.session)
@@ -127,7 +127,7 @@ class FacebookIntegrationTests(APITestCase):
 
     @patch('facebook.views.get_authorized_pages')
     @patch('facebook.views.get_facebook_identity', return_value='fb-user-200')
-    @patch('facebook.views.get_granted_permissions', return_value=['pages_read_engagement', 'pages_show_list'])
+    @patch('facebook.views.get_granted_permissions', return_value=['pages_read_engagement', 'pages_show_list', 'pages_manage_posts'])
     @patch('facebook.views.exchange_authorization_code')
     def test_successful_oauth_callback_saves_encrypted_tokens_and_pages(
         self,
@@ -166,6 +166,25 @@ class FacebookIntegrationTests(APITestCase):
         permissions.assert_called_once()
         identity.assert_called_once()
         pages.assert_called_once()
+
+    @patch('facebook.views.get_authorized_pages')
+    @patch('facebook.views.get_facebook_identity', return_value='fb-user-missing-permission')
+    @patch('facebook.views.get_granted_permissions', return_value=['pages_show_list', 'pages_read_engagement'])
+    @patch('facebook.views.exchange_authorization_code', return_value=('private-user-token', timezone.now() + timedelta(days=30)))
+    def test_missing_publish_permission_is_stored_and_requires_reconnection(
+        self, exchange, permissions, identity, pages,
+    ):
+        self.seed_oauth_session()
+        response = self.client.get(
+            '/api/facebook/oauth/callback/',
+            {'state': 'known-oauth-state', 'code': 'code'},
+        )
+        self.assertRedirects(response, 'http://localhost:5173/?facebook=permissions-missing', fetch_redirect_response=False)
+        account = FacebookAccount.objects.get(owner=self.user)
+        self.assertEqual(account.status, FacebookAccount.Status.REVOKED)
+        self.assertNotIn('pages_manage_posts', account.granted_permissions)
+        self.assertEqual(account.get_access_token(), 'private-user-token')
+        pages.assert_not_called()
 
     @patch('facebook.views.exchange_authorization_code')
     def test_invalid_callback_state_is_rejected_without_exchanging_code(self, exchange):
@@ -452,7 +471,7 @@ class FacebookIntegrationTests(APITestCase):
         self.assertFalse(page.selected)
 
     @patch('facebook.services.get_authorized_pages', return_value=[])
-    @patch('facebook.services.get_granted_permissions', return_value=['pages_show_list', 'pages_read_engagement'])
+    @patch('facebook.services.get_granted_permissions', return_value=['pages_show_list', 'pages_read_engagement', 'pages_manage_posts'])
     def test_refresh_saves_only_owner_pages(self, permissions, get_pages):
         account = self.create_account()
         get_pages.return_value = [{

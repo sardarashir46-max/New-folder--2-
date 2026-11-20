@@ -169,7 +169,8 @@ if YOUTUBE_MONITORING_ENABLED:
         'schedule': YOUTUBE_MONITOR_INTERVAL_SECONDS,
     }
 
-PUBLISHING_DISPATCH_ENABLED = os.environ.get('PUBLISHING_DISPATCH_ENABLED', 'True').lower() in ('true', '1', 'yes')
+PUBLISHING_ENABLED = os.environ.get('FACEBOOK_PUBLISHING_ENABLED', 'False').lower() in ('true', '1', 'yes')
+PUBLISHING_DISPATCH_ENABLED = PUBLISHING_ENABLED and os.environ.get('PUBLISHING_DISPATCH_ENABLED', 'True').lower() in ('true', '1', 'yes')
 PUBLISHING_DISPATCH_INTERVAL_SECONDS = max(10, int(os.environ.get('PUBLISHING_DISPATCH_INTERVAL_SECONDS', '30')))
 # Keep queue recovery later than the maximum Celery retry backoff (one hour).
 PUBLISHING_DISPATCH_STALE_SECONDS = max(3660, int(os.environ.get('PUBLISHING_DISPATCH_STALE_SECONDS', '3900')))
@@ -179,12 +180,16 @@ if PUBLISHING_DISPATCH_ENABLED:
         'task': 'library.tasks.dispatch_due_scheduled_posts',
         'schedule': PUBLISHING_DISPATCH_INTERVAL_SECONDS,
     }
+    CELERY_BEAT_SCHEDULE['recover-stale-publishing-targets'] = {
+        'task': 'library.tasks.recover_stale_processing_targets',
+        'schedule': PUBLISHING_DISPATCH_STALE_SECONDS,
+    }
 
 MEDIA_ROOT = Path(os.environ.get('SOCIALAUTOMATION_MEDIA_ROOT', BASE_DIR / 'uploads')).resolve()
 MEDIA_MAX_UPLOAD_BYTES = max(1, int(os.environ.get('MEDIA_MAX_UPLOAD_MB', '500'))) * 1024 * 1024
 
-# Keep the uploads private: media is streamed through an authenticated API view.
-# Celery tasks only queue due posts; actual Facebook publishing is disabled in this milestone.
+# Keep uploads private: media is streamed through an authenticated API view and
+# Facebook workers read it directly from private storage only when explicitly enabled.
 
 # Facebook Login and Graph API are configured per environment. App credentials
 # are intentionally optional at startup so the rest of Django remains usable.
@@ -200,7 +205,7 @@ FACEBOOK_FRONTEND_URL = os.environ.get(
 ).strip()
 FACEBOOK_GRAPH_API_VERSION = os.environ.get('FACEBOOK_GRAPH_API_VERSION', 'v27.0').strip()
 FACEBOOK_TOKEN_ENCRYPTION_KEY = os.environ.get('FACEBOOK_TOKEN_ENCRYPTION_KEY', '').strip()
-FACEBOOK_LOGIN_SCOPES = ('pages_show_list', 'pages_read_engagement')
+FACEBOOK_LOGIN_SCOPES = ('pages_show_list', 'pages_read_engagement', 'pages_manage_posts')
 
 # Login throttles use Django's cache. LocMem is convenient for one local server;
 # multi-worker deployments should point these settings at a shared cache service.

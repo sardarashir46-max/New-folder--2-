@@ -1,4 +1,5 @@
 """Database synchronization for Facebook account and Page metadata."""
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -57,8 +58,6 @@ def save_authorized_pages(account, page_items):
     now = timezone.now()
     seen_page_ids = set()
     with transaction.atomic():
-        account.status = FacebookAccount.Status.CONNECTED
-        account.save(update_fields=['status', 'updated_at'])
         for item in page_items:
             page_id = str(item['id'])
             seen_page_ids.add(page_id)
@@ -91,20 +90,22 @@ def save_authorized_pages(account, page_items):
 
 def complete_facebook_connection(user, facebook_user_id, access_token, expires_at, permissions, pages):
     """Save OAuth credentials only after identity, permissions and Page retrieval succeed."""
+    required = set(settings.FACEBOOK_LOGIN_SCOPES)
+    connected_status = FacebookAccount.Status.CONNECTED if required.issubset(set(permissions)) else FacebookAccount.Status.REVOKED
     with transaction.atomic():
         account, created = FacebookAccount.objects.get_or_create(
             owner=user,
             defaults={
                 'facebook_user_id': facebook_user_id,
                 'token_expires_at': expires_at,
-                'status': FacebookAccount.Status.CONNECTED,
+                'status': connected_status,
                 'granted_permissions': permissions,
             },
         )
         account.facebook_user_id = facebook_user_id
         account.set_access_token(access_token)
         account.token_expires_at = expires_at
-        account.status = FacebookAccount.Status.CONNECTED
+        account.status = connected_status
         account.granted_permissions = permissions
         if not created:
             account.connected_at = timezone.now()
@@ -117,6 +118,14 @@ def refresh_authorized_pages(account):
     try:
         # Check that the Page permissions still exist before relying on them.
         permissions = get_granted_permissions(access_token)
+        missing = set(settings.FACEBOOK_LOGIN_SCOPES) - set(permissions)
+        if missing:
+            account.granted_permissions = permissions
+            account.status = FacebookAccount.Status.REVOKED
+            account.save(update_fields=['granted_permissions', 'status', 'updated_at'])
+            raise FacebookPermissionMissing(
+                f'Missing Meta permissions: {", ".join(sorted(missing))}. Reconnect and approve them; Meta app review/access may be required.'
+            )
         pages = get_authorized_pages(access_token, account.facebook_user_id)
     except FacebookTokenExpired:
         account.status = FacebookAccount.Status.EXPIRED

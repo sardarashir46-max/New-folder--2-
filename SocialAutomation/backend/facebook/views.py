@@ -84,7 +84,8 @@ def oauth_callback(request):
         access_token, expires_at = exchange_authorization_code(code_values[0])
         permissions = get_granted_permissions(access_token)
         facebook_user_id = get_facebook_identity(access_token)
-        pages = get_authorized_pages(access_token, facebook_user_id)
+        missing_permissions = set(settings.FACEBOOK_LOGIN_SCOPES) - set(permissions)
+        pages = [] if missing_permissions else get_authorized_pages(access_token, facebook_user_id)
         complete_facebook_connection(
             request.user,
             facebook_user_id,
@@ -93,6 +94,8 @@ def oauth_callback(request):
             permissions,
             pages,
         )
+        if missing_permissions:
+            return _frontend_result('permissions-missing')
     except (FacebookIntegrationError, TokenEncryptionError):
         return _frontend_result('connection-error')
     return _frontend_result('connected')
@@ -104,7 +107,12 @@ class FacebookConnectionView(APIView):
     def get(self, request):
         account = account_for_user(request.user)
         if account is None:
-            return Response({'connected': False, 'status': FacebookAccount.Status.REVOKED})
+            return Response({
+                'connected': False,
+                'status': FacebookAccount.Status.REVOKED,
+                'publishing_enabled': settings.PUBLISHING_ENABLED,
+                'publishing_configured': bool(settings.FACEBOOK_APP_ID and settings.FACEBOOK_APP_SECRET and settings.FACEBOOK_TOKEN_ENCRYPTION_KEY),
+            })
         if (
             account.status == FacebookAccount.Status.CONNECTED
             and account.token_expires_at
@@ -113,7 +121,12 @@ class FacebookConnectionView(APIView):
             account.status = FacebookAccount.Status.EXPIRED
             account.save(update_fields=['status', 'updated_at'])
         data = FacebookConnectionSerializer(account).data
-        return Response({'connected': account.status == FacebookAccount.Status.CONNECTED, **data})
+        return Response({
+            'connected': account.status == FacebookAccount.Status.CONNECTED,
+            'publishing_enabled': settings.PUBLISHING_ENABLED,
+            'publishing_configured': bool(settings.FACEBOOK_APP_ID and settings.FACEBOOK_APP_SECRET and settings.FACEBOOK_TOKEN_ENCRYPTION_KEY),
+            **data,
+        })
 
     def delete(self, request):
         account = account_for_user(request.user)

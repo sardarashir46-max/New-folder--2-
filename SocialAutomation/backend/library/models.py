@@ -56,6 +56,7 @@ class ScheduledPost(models.Model):
         PUBLISHED = 'published', 'Published'
         PARTIAL = 'partial', 'Partially published'
         FAILED = 'failed', 'Failed'
+        REVIEW_REQUIRED = 'review_required', 'Review required'
         CANCELLED = 'cancelled', 'Cancelled'
 
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='scheduled_posts')
@@ -86,6 +87,7 @@ class ScheduledPostTarget(models.Model):
         PENDING = 'pending', 'Pending'
         PROCESSING = 'processing', 'Processing'
         PUBLISHED = 'published', 'Published'
+        REVIEW_REQUIRED = 'review_required', 'Review required'
         FAILED = 'failed', 'Failed'
         CANCELLED = 'cancelled', 'Cancelled'
 
@@ -118,6 +120,7 @@ class PublishingAttempt(models.Model):
         RETRYING = 'retrying', 'Waiting to retry'
         PUBLISHED = 'published', 'Published'
         FAILED = 'failed', 'Failed'
+        UNCERTAIN = 'uncertain', 'Outcome uncertain'
 
     target = models.ForeignKey(ScheduledPostTarget, on_delete=models.CASCADE, related_name='attempts')
     attempt_number = models.PositiveIntegerField()

@@ -1,5 +1,6 @@
 """Authenticated, owner-scoped API for private media and scheduled posts."""
 from django.db import transaction
+from django.conf import settings
 from django.db.models import Q
 from django.http import FileResponse
 from django.utils import timezone
@@ -187,6 +188,8 @@ class DashboardSummaryView(APIView):
             scheduled_for__gte=now,
         ).prefetch_related('targets')[:4]
         return Response({
+            'facebook_publishing_enabled': settings.PUBLISHING_ENABLED,
+            'facebook_publishing_configured': bool(settings.FACEBOOK_APP_ID and settings.FACEBOOK_APP_SECRET and settings.FACEBOOK_TOKEN_ENCRYPTION_KEY),
             'youtube_channels': Channel.objects.filter(owner=request.user).count(),
             'youtube_connected': Channel.objects.filter(owner=request.user, connection_status=Channel.ConnectionStatus.CONNECTED).exists(),
             'facebook_connected': FacebookAccount.objects.filter(owner=request.user, status=FacebookAccount.Status.CONNECTED).exists(),

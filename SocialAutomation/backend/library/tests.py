@@ -1,8 +1,10 @@
 import tempfile
 import uuid
+from io import BytesIO
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from cryptography.fernet import Fernet
 from celery.exceptions import Retry
@@ -15,10 +17,17 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from facebook.models import FacebookAccount, FacebookPage
+from facebook.oauth import FacebookTokenExpired
 
 from .models import MediaAsset, PublishingAttempt, ScheduledPost, ScheduledPostTarget
-from .services import TemporaryPublishingError
-from .tasks import dispatch_due_scheduled_posts, process_scheduled_post
+from .services import (
+    FacebookPublishingService,
+    PermanentPublishingError,
+    TemporaryPublishingError,
+    UncertainPublishingError,
+    validate_target_is_still_authorized,
+)
+from .tasks import dispatch_due_scheduled_posts, process_scheduled_post, recover_stale_processing_targets
 
 
 TEST_FERNET_KEY = Fernet.generate_key().decode('ascii')
@@ -29,9 +38,20 @@ MP4_CONTENT = b'\x00\x00\x00\x18ftypisom' + b'video payload for validation'
     FACEBOOK_TOKEN_ENCRYPTION_KEY=TEST_FERNET_KEY,
     MEDIA_MAX_UPLOAD_BYTES=1024 * 1024,
     PUBLISHING_MAX_RETRIES=1,
+    PUBLISHING_ENABLED=True,
+    PUBLISHING_DISPATCH_ENABLED=True,
 )
 class ContentLibraryAndSchedulingTests(APITestCase):
     def setUp(self):
+        self.graph_token_check = patch('library.services.graph_get', side_effect=lambda endpoint, *args, **kwargs: {'id': endpoint})
+        self.graph_token_check.start()
+        self.addCleanup(self.graph_token_check.stop)
+        self.publisher_safety = patch(
+            'library.tasks.FacebookPublishingService.publish',
+            side_effect=PermanentPublishingError('Mocked Meta denial.'),
+        )
+        self.publisher_safety.start()
+        self.addCleanup(self.publisher_safety.stop)
         user_model = get_user_model()
         self.user = user_model.objects.create_user(
             username='library-owner',
@@ -85,17 +105,21 @@ class ContentLibraryAndSchedulingTests(APITestCase):
                 facebook_user_id=f'fb-user-{user.pk}',
                 token_expires_at=timezone.now() + timedelta(days=20),
                 status=account_status,
-                granted_permissions=['pages_show_list', 'pages_read_engagement'],
+                granted_permissions=['pages_show_list', 'pages_read_engagement', 'pages_manage_posts'],
             )
             account.set_access_token('private-user-token')
             account.save()
-        return FacebookPage.objects.create(
+        page = FacebookPage.objects.create(
             account=account,
             page_id=f'page-{user.pk}-{self.page_counter}',
             name=f'Owner Page {self.page_counter}',
             selected=selected,
+            tasks=['CREATE_CONTENT'],
             page_access_token_encrypted='',
         )
+        page.set_page_access_token('private-page-token')
+        page.save(update_fields=['page_access_token_encrypted'])
+        return page
 
     def schedule(self, media=None, pages=None, user=None, scheduled_for=None, key=None):
         media = media or self.make_media()
@@ -339,7 +363,7 @@ class ContentLibraryAndSchedulingTests(APITestCase):
         self.assertEqual(post.status, ScheduledPost.Status.QUEUED)
         enqueue.assert_called_once_with(args=(post.pk,), task_id=f'scheduled-post-{post.pk}')
 
-    def test_safe_placeholder_records_failed_attempt_without_claiming_success(self):
+    def test_disabled_publishing_keeps_due_post_pending_without_attempt(self):
         media = self.make_media()
         page = self.make_page()
         created = self.schedule(media=media, pages=[page])
@@ -347,23 +371,17 @@ class ContentLibraryAndSchedulingTests(APITestCase):
         post = ScheduledPost.objects.get(pk=created.data['id'])
         post.scheduled_for = timezone.now() - timedelta(seconds=1)
         post.save(update_fields=['scheduled_for'])
-        dispatch_due_scheduled_posts.run()
-
-        process_scheduled_post.apply(args=(post.pk,), task_id=f'scheduled-post-{post.pk}')
-        # Duplicate delivery of the same Celery task sees a completed post and is a no-op.
-        process_scheduled_post.apply(args=(post.pk,), task_id=f'scheduled-post-{post.pk}')
+        with override_settings(PUBLISHING_ENABLED=False, PUBLISHING_DISPATCH_ENABLED=False):
+            self.assertEqual(dispatch_due_scheduled_posts.run(), 0)
+            process_scheduled_post.apply(args=(post.pk,), task_id=f'scheduled-post-{post.pk}')
         post.refresh_from_db()
         target = post.targets.get()
-        attempt = target.attempts.get()
-
-        self.assertEqual(post.status, ScheduledPost.Status.FAILED)
-        self.assertEqual(target.status, ScheduledPostTarget.Status.FAILED)
-        self.assertEqual(attempt.status, PublishingAttempt.Status.FAILED)
-        self.assertIn('not enabled', attempt.error.lower())
+        self.assertEqual(post.status, ScheduledPost.Status.PENDING)
+        self.assertEqual(target.status, ScheduledPostTarget.Status.PENDING)
+        self.assertEqual(target.attempts.count(), 0)
         self.assertFalse(target.external_post_id)
         self.assertIsNone(target.published_at)
         self.assertIsNone(post.published_at)
-        self.assertEqual(target.attempts.count(), 1)
 
     @patch('library.tasks.FacebookPublishingService.publish')
     def test_each_page_target_keeps_its_own_publishing_result(self, publish):
@@ -391,6 +409,154 @@ class ContentLibraryAndSchedulingTests(APITestCase):
         self.assertEqual(targets[0].external_post_id, 'meta-post-confirmed-by-test')
         self.assertFalse(targets[1].external_post_id)
         self.assertEqual([target.attempts.count() for target in targets], [1, 1])
+
+    def test_meta_video_adapter_uses_chunked_upload_and_requires_confirmed_id(self):
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        target = ScheduledPost.objects.get(pk=created.data['id']).targets.get()
+        calls = []
+        adapter = FacebookPublishingService()
+        adapter.CHUNK_SIZE = 8
+        self.publisher_safety.stop()
+
+        def fake_post(endpoint, fields, file_field=None, file_chunk=None, offset=None):
+            calls.append((fields.copy(), file_field, file_chunk))
+            if fields.get('upload_phase') == 'start':
+                return {'upload_session_id': 'session-1', 'video_id': 'video-1', 'start_offset': '0', 'end_offset': str(media.file_size)}
+            if fields.get('upload_phase') == 'transfer':
+                next_offset = int(fields['start_offset']) + len(file_chunk)
+                return {'start_offset': str(next_offset), 'end_offset': str(media.file_size)}
+            return {'success': True, 'video_id': 'video-1'}
+
+        with patch.object(adapter, '_post', side_effect=fake_post):
+            result = adapter.publish(target, str(target.idempotency_key))
+
+        self.assertEqual(result, {'confirmed': True, 'external_post_id': 'video-1'})
+        self.assertEqual(calls[0][0]['upload_phase'], 'start')
+        self.assertGreater(sum(call[1] == 'video_file_chunk' for call in calls), 1)
+        self.assertEqual(calls[-1][0]['upload_phase'], 'finish')
+        self.assertIn('A post caption', calls[-1][0]['description'])
+
+    def test_worker_records_uncertain_meta_finish_as_review_required(self):
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        post = ScheduledPost.objects.get(pk=created.data['id'])
+        post.scheduled_for = timezone.now() - timedelta(seconds=1)
+        post.save(update_fields=['scheduled_for'])
+        dispatch_due_scheduled_posts.run()
+
+        with patch('library.tasks.FacebookPublishingService.publish', side_effect=UncertainPublishingError('Review the Page before retrying.')):
+            process_scheduled_post.apply(args=(post.pk,), task_id=f'scheduled-post-{post.pk}')
+
+        post.refresh_from_db()
+        target = post.targets.get()
+        self.assertEqual(post.status, ScheduledPost.Status.REVIEW_REQUIRED)
+        self.assertEqual(target.status, ScheduledPostTarget.Status.REVIEW_REQUIRED)
+        self.assertEqual(target.attempts.get().status, PublishingAttempt.Status.UNCERTAIN)
+        self.assertFalse(target.external_post_id)
+
+    def test_stale_processing_target_recovers_to_manual_review(self):
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        post = ScheduledPost.objects.get(pk=created.data['id'])
+        target = post.targets.get()
+        post.status = ScheduledPost.Status.PROCESSING
+        post.save(update_fields=['status'])
+        target.status = ScheduledPostTarget.Status.PROCESSING
+        target.save(update_fields=['status'])
+        attempt = PublishingAttempt.objects.create(
+            target=target, attempt_number=1, idempotency_key=f'{target.idempotency_key}:stale',
+        )
+        stale_time = timezone.now() - timedelta(seconds=4000)
+        ScheduledPostTarget.objects.filter(pk=target.pk).update(updated_at=stale_time)
+
+        self.assertEqual(recover_stale_processing_targets.run(), 1)
+        target.refresh_from_db(); post.refresh_from_db(); attempt.refresh_from_db()
+        self.assertEqual(target.status, ScheduledPostTarget.Status.REVIEW_REQUIRED)
+        self.assertEqual(post.status, ScheduledPost.Status.REVIEW_REQUIRED)
+        self.assertEqual(attempt.status, PublishingAttempt.Status.UNCERTAIN)
+
+    def test_worker_revalidation_requires_manage_posts_and_create_content(self):
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        target = ScheduledPost.objects.get(pk=created.data['id']).targets.get()
+        target.page.account.granted_permissions = ['pages_show_list', 'pages_read_engagement']
+        target.page.account.save(update_fields=['granted_permissions'])
+        self.assertIn('pages_manage_posts', validate_target_is_still_authorized(target))
+        target.page.account.granted_permissions.append('pages_manage_posts')
+        target.page.account.save(update_fields=['granted_permissions'])
+        target.page.tasks = ['ANALYZE']
+        target.page.save(update_fields=['tasks'])
+        self.assertIn('CREATE_CONTENT', validate_target_is_still_authorized(target))
+
+    def test_expired_page_token_is_reported_before_upload(self):
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        target = ScheduledPost.objects.get(pk=created.data['id']).targets.get()
+        with patch('library.services.graph_get', side_effect=FacebookTokenExpired('private token details')):
+            message = validate_target_is_still_authorized(target)
+        self.assertIn('token expired', message.lower())
+        self.assertNotIn('private token details', message)
+
+    def test_invalid_meta_upload_session_is_permanent_failure(self):
+        from .services import PermanentPublishingError
+
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        target = ScheduledPost.objects.get(pk=created.data['id']).targets.get()
+        adapter = FacebookPublishingService()
+        self.publisher_safety.stop()
+        with patch.object(adapter, '_post', return_value={'unexpected': 'response'}):
+            with self.assertRaises(PermanentPublishingError):
+                adapter.publish(target, str(target.idempotency_key))
+
+    def test_meta_rate_limit_is_classified_as_temporary_without_leaking_response(self):
+        from .services import TemporaryPublishingError
+
+        adapter = FacebookPublishingService()
+        body = BytesIO(b'{"error":{"code":613,"message":"private-token-value"}}')
+        error = HTTPError('https://graph-video.facebook.com', 429, 'rate limit', {}, body)
+        with patch('library.services.urlopen', side_effect=error):
+            with self.assertRaises(TemporaryPublishingError) as caught:
+                adapter._post('page/videos', {'access_token': 'private-token-value'})
+        self.assertNotIn('private-token-value', str(caught.exception))
+
+    def test_temporary_network_failure_does_not_include_token(self):
+        from .services import TemporaryPublishingError
+
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        target = ScheduledPost.objects.get(pk=created.data['id']).targets.get()
+        adapter = FacebookPublishingService()
+        self.publisher_safety.stop()
+        with patch.object(adapter, '_post', side_effect=URLError('private-token-value')):
+            with self.assertRaises(TemporaryPublishingError) as caught:
+                adapter.publish(target, str(target.idempotency_key))
+        self.assertNotIn('private-token-value', str(caught.exception))
+
+    def test_duplicate_worker_delivery_does_not_publish_twice(self):
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        post = ScheduledPost.objects.get(pk=created.data['id'])
+        post.scheduled_for = timezone.now() - timedelta(seconds=1)
+        post.save(update_fields=['scheduled_for'])
+        dispatch_due_scheduled_posts.run()
+        with patch('library.tasks.FacebookPublishingService.publish', return_value={
+            'confirmed': True, 'external_post_id': 'mock-video-1',
+        }) as publish:
+            process_scheduled_post.apply(args=(post.pk,), task_id=f'scheduled-post-{post.pk}')
+            process_scheduled_post.apply(args=(post.pk,), task_id=f'scheduled-post-{post.pk}')
+        self.assertEqual(publish.call_count, 1)
+        post.refresh_from_db()
+        self.assertEqual(post.status, ScheduledPost.Status.PUBLISHED)
 
     @patch('library.tasks.FacebookPublishingService.publish', side_effect=TemporaryPublishingError('Temporary Meta service error.'))
     def test_temporary_failure_is_recorded_and_retried_with_task_backoff(self, publish):

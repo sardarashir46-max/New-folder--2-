@@ -4,7 +4,7 @@ import { apiFetch, responseError } from "./api";
 
 const statusLabel = {
   pending: "Pending", queued: "Queued", processing: "Processing",
-  published: "Published", partial: "Partially published", failed: "Failed", cancelled: "Cancelled",
+  published: "Published", partial: "Partially published", failed: "Failed", review_required: "Review required", cancelled: "Cancelled",
 };
 
 function initialLocalSchedule() {
@@ -116,7 +116,7 @@ export default function PublishingCalendarPanel({ onSessionExpired }) {
       });
       if (response.status === 401 || response.status === 403) onSessionExpired?.();
       if (!response.ok) throw new Error(await responseError(response));
-      setNotice(editingId ? "Scheduled post updated." : "Post added to the calendar. It will not be published until the publishing integration is enabled.");
+      setNotice(editingId ? "Scheduled post updated." : "Post added to the calendar.");
       resetForm(); await loadData();
     } catch (saveError) { setError(saveError.message || "Could not save the scheduled post."); }
     finally { setSaving(false); }
@@ -143,7 +143,8 @@ export default function PublishingCalendarPanel({ onSessionExpired }) {
     <section className="publishing-workspace">
       <article className="panel scheduling-panel" id="scheduled-post-form">
         <div className="panel-heading"><div><h3>{editingId ? "Edit scheduled post" : "Schedule a post"}</h3><p>Choose approved media, selected Pages, and a future time.</p></div>{editingId && <button className="subtle-button" onClick={resetForm}><X size={14}/> Stop editing</button>}</div>
-        <div className="publishing-disabled-note"><AlertCircle size={15}/><span>Scheduling is available, but Facebook publishing is deliberately disabled in this milestone. Due posts will record a failed attempt and no content will be sent.</span></div>
+        <div className="publishing-disabled-note"><AlertCircle size={15}/><span>{connection?.publishing_enabled ? "Facebook publishing is enabled on this server. Posts publish only after the configured worker runs and Meta confirms success." : "Facebook publishing is disabled on this server. Scheduled posts remain pending and no attempt is made until an administrator enables publishing."}</span></div>
+        {connection?.requires_reconnection && <div className="library-message error" role="status"><AlertCircle size={15}/>Reconnect Facebook and approve pages_manage_posts and other required permissions.</div>}
         {!connection?.connected && <div className="library-message error" role="status"><AlertCircle size={15}/>Connect a valid Facebook account before scheduling a post.</div>}
         <form className="schedule-form" onSubmit={submitPost}>
           <label>Approved video<select value={mediaId} onChange={event => updateFormValue(setMediaId, event.target.value)} required disabled={!approvedMedia.length}><option value="">Select media…</option>{approvedMedia.map(item => <option key={item.id} value={item.id}>{item.title} · {item.rights_status}</option>)}</select></label>
