@@ -3,6 +3,7 @@ import time
 
 from django.conf import settings
 from django.http import HttpResponseRedirect
+from django.utils import timezone
 from django.utils.http import urlencode
 from django.views.decorators.http import require_GET
 from rest_framework import status
@@ -107,7 +108,7 @@ class FacebookConnectionView(APIView):
         if (
             account.status == FacebookAccount.Status.CONNECTED
             and account.token_expires_at
-            and account.token_expires_at <= __import__('django.utils.timezone', fromlist=['now']).now()
+            and account.token_expires_at <= timezone.now()
         ):
             account.status = FacebookAccount.Status.EXPIRED
             account.save(update_fields=['status', 'updated_at'])

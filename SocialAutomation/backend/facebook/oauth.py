@@ -3,6 +3,7 @@ import hmac
 import json
 import re
 import time
+from datetime import timedelta
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -99,6 +100,8 @@ def _request_json(endpoint, params, method='GET'):
         raise FacebookIntegrationError(
             'Could not reach Meta. Please retry in a moment.'
         ) from None
+    if isinstance(data, bool) and method == 'DELETE':
+        return data
     if not isinstance(data, dict):
         raise FacebookIntegrationError('Meta returned an unexpected response. Please retry.')
     if 'error' in data:
@@ -137,7 +140,7 @@ def exchange_authorization_code(code):
         raise FacebookIntegrationError('Meta did not return a usable access token. Please reconnect.')
     expires_in = long_lived.get('expires_in', token_data.get('expires_in'))
     try:
-        expires_at = timezone.now() + timezone.timedelta(seconds=int(expires_in)) if expires_in else None
+        expires_at = timezone.now() + timedelta(seconds=int(expires_in)) if expires_in else None
     except (TypeError, ValueError, OverflowError):
         expires_at = None
     return access_token, expires_at
@@ -190,7 +193,8 @@ def get_authorized_pages(access_token, facebook_user_id):
     pages = []
     seen_cursors = set()
     for _page_number in range(100):
-        response = graph_get(endpoint, access_token, params)
+        # Copy the query so pagination cannot mutate the first request's parameters.
+        response = graph_get(endpoint, access_token, dict(params))
         items = response.get('data', [])
         if not isinstance(items, list):
             raise FacebookIntegrationError('Meta returned an unexpected Pages response.')

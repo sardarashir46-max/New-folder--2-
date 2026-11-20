@@ -10,7 +10,7 @@ python -m venv venv
 pip install -r requirements.txt
 ```
 
-If `backend/.env` does not already exist, copy `.env.example` to `.env`. Preserve any existing `.env` and add or update only the required keys. Set a random `DJANGO_SECRET_KEY` and `YOUTUBE_API_KEY` from Google Cloud Console. Enable **YouTube Data API v3** and restrict the API key to that API. Never commit `.env`.
+If `backend/.env` does not already exist, copy `.env.example` to `.env`. Preserve any existing `.env` and add or update only the required keys. Set a random `DJANGO_SECRET_KEY`, `YOUTUBE_API_KEY` from Google Cloud Console, and the Facebook settings below. Enable **YouTube Data API v3** and restrict the API key to that API. Never commit `.env`.
 
 Then run:
 
@@ -48,3 +48,23 @@ py -m celery -A config beat --loglevel=INFO
 Run only one Celery Beat scheduler for this project so a periodic check is not dispatched twice. The `solo` pool is suitable for local Windows development; use a supported worker pool on Linux deployments. Redis must be available to the Beat scheduler and workers. Channel creation/manual refresh still use the YouTube API synchronously; scheduled monitoring never runs inside a Django API request. The dashboard refreshes channel status and recent discoveries once per minute while open.
 
 Login attempts are limited to 5 per username and 20 per IP per minute. Multi-worker deployments need a shared cache.
+
+## Facebook Pages connection
+
+Facebook Login uses the official Meta authorization-code flow. Create a Meta developer app, enable Facebook Login, and add this exact valid OAuth redirect URI to its Facebook Login settings:
+
+```text
+http://localhost:8000/api/facebook/oauth/callback/
+```
+
+Set `FACEBOOK_APP_ID` and `FACEBOOK_APP_SECRET` from that app, `FACEBOOK_REDIRECT_URI` to the same callback, and `FACEBOOK_FRONTEND_URL` to the dashboard origin. Generate a private Fernet key for `FACEBOOK_TOKEN_ENCRYPTION_KEY` with:
+
+```bash
+py -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Keep the encryption key stable and secret: stored Facebook user and Page tokens cannot be decrypted without it. Do not put the Meta app secret or Fernet key in frontend variables or commit them. For deployment, configure an HTTPS callback and dashboard URL, secure cookies, exact CORS/CSRF origins, and keep the key in a secret manager.
+
+The integration currently requests only `pages_show_list` and `pages_read_engagement`, then lists authorized Pages and lets the user select/deselect them. Tokens are encrypted at rest and never included in API responses. Disconnect attempts to revoke only the permissions requested by this integration, then removes local token/Page records even if Meta is unavailable. A Page selection is a user preference, not proof of ownership or redistribution rights.
+
+No publishing action is implemented. Future publishing needs Meta's supported Page publishing permissions and review, Page task authorization, explicit user intent, and content rights. Do not request `pages_manage_posts` until that separate milestone. The Graph API version is configurable with `FACEBOOK_GRAPH_API_VERSION` and defaults to `v27.0`; Meta versions and app-review requirements change over time.

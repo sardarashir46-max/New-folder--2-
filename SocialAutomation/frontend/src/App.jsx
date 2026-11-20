@@ -1,6 +1,7 @@
 import React from 'react';
 import { useEffect, useState } from "react";
 import AuthScreen from "./AuthScreen";
+import FacebookPagesPanel from "./FacebookPagesPanel";
 import YouTubeChannelsPanel from "./YouTubeChannelsPanel";
 import { apiFetch, responseError } from "./api";
 import {
@@ -36,8 +37,8 @@ function StatCard({ label, value, change, icon: Icon, tone }) {
   );
 }
 
-function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutError }) {
-  const [active, setActive] = useState("Overview");
+function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutError, facebookCallbackStatus }) {
+  const [active, setActive] = useState(() => facebookCallbackStatus ? "Facebook Pages" : "Overview");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [notice, setNotice] = useState("");
@@ -111,7 +112,7 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
         <div className="page-content">
           <section className="page-heading">
             <div><div className="eyebrow"><span className="live-dot"/> WORKSPACE OVERVIEW</div><h1>{title}</h1><p>{descriptions[active]}</p></div>
-            {active !== "YouTube channels" && <button className="primary-button" onClick={() => showNotice("Connect an account in the Accounts setup phase.")}><Plus size={17}/> Connect account</button>}
+            {!['YouTube channels', 'Facebook Pages'].includes(active) && <button className="primary-button" onClick={() => showNotice("Connect an account in the Accounts setup phase.")}><Plus size={17}/> Connect account</button>}
           </section>
 
           {active === "Overview" ? (
@@ -148,6 +149,12 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
             </>
           ) : active === "YouTube channels" ? (
             <YouTubeChannelsPanel onSessionExpired={onSessionExpired} onNotice={showNotice} />
+          ) : active === "Facebook Pages" ? (
+            <FacebookPagesPanel
+              onSessionExpired={onSessionExpired}
+              onNotice={showNotice}
+              callbackStatus={facebookCallbackStatus}
+            />
           ) : (
             <section className="panel section-placeholder">
               <div className="placeholder-icon">{active === "YouTube channels" ? <Youtube/> : active === "Facebook Pages" ? <Facebook/> : active === "Media library" ? <FileVideo2/> : active === "Publishing calendar" ? <CalendarDays/> : <Activity/>}</div>
@@ -171,6 +178,7 @@ function App() {
   const [sessionError, setSessionError] = useState("");
   const [logoutLoading, setLogoutLoading] = useState(false);
   const [logoutError, setLogoutError] = useState("");
+  const [facebookCallbackStatus] = useState(() => new URLSearchParams(window.location.search).get("facebook"));
 
   async function checkSession(signal) {
     setCheckingSession(true);
@@ -221,7 +229,7 @@ function App() {
   if (sessionError) {
     return <main className="auth-shell"><div className="auth-card auth-unavailable"><h1>Can't reach your workspace</h1><p>{sessionError}</p><button className="primary-button" onClick={() => checkSession()}>Try again</button></div></main>;
   }
-  return user ? <Dashboard user={user} onLogout={handleLogout} onSessionExpired={() => setUser(null)} logoutLoading={logoutLoading} logoutError={logoutError} /> : <AuthScreen onAuthenticated={setUser} />;
+  return user ? <Dashboard user={user} onLogout={handleLogout} onSessionExpired={() => setUser(null)} logoutLoading={logoutLoading} logoutError={logoutError} facebookCallbackStatus={facebookCallbackStatus} /> : <AuthScreen onAuthenticated={setUser} />;
 }
 
 export default App;
