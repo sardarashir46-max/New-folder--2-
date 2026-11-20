@@ -1,5 +1,6 @@
 """Business rules and official server-side Meta video publishing adapter."""
 import json
+import re
 import uuid
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -87,10 +88,24 @@ class UncertainPublishingError(PublishingError):
 class FacebookPublishingService:
     """Upload private video files through Meta's official Page Videos chunked API."""
 
-    CHUNK_SIZE = 8 * 1024 * 1024
+    VIDEO_UPLOAD_HOST = 'graph-video.facebook.com'
+
+    @staticmethod
+    def _offset(value, file_size):
+        """Parse and bound an offset returned by Meta without accepting bools/floats."""
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise PermanentPublishingError('Meta returned invalid video upload offsets.')
+        if isinstance(value, str) and not re.fullmatch(r'\d+', value):
+            raise PermanentPublishingError('Meta returned invalid video upload offsets.')
+        offset = int(value)
+        if offset < 0 or offset > file_size:
+            raise PermanentPublishingError('Meta returned out-of-range video upload offsets.')
+        return offset
 
     def _post(self, endpoint, fields, file_field=None, file_chunk=None):
         version = settings.FACEBOOK_GRAPH_API_VERSION
+        if not re.fullmatch(r'v\d+\.\d+', version):
+            raise PermanentPublishingError('The Meta Graph API version is not configured correctly.')
         boundary = f'----SocialAutomation{uuid.uuid4().hex}'
         body = bytearray()
         for key, value in fields.items():
@@ -100,8 +115,7 @@ class FacebookPublishingService:
             body.extend(file_chunk)
             body.extend(b'\r\n')
         body.extend(f'--{boundary}--\r\n'.encode())
-        host = 'graph-video.facebook.com' if file_field else 'graph.facebook.com'
-        request = Request(f'https://{host}/{version}/{endpoint.lstrip("/")}', data=bytes(body), headers={'Content-Type': f'multipart/form-data; boundary={boundary}', 'Accept': 'application/json'}, method='POST')
+        request = Request(f'https://{self.VIDEO_UPLOAD_HOST}/{version}/{endpoint.lstrip("/")}', data=bytes(body), headers={'Content-Type': f'multipart/form-data; boundary={boundary}', 'Accept': 'application/json'}, method='POST')
         try:
             with urlopen(request, timeout=120) as response:
                 data = json.loads(response.read().decode('utf-8'))
@@ -149,25 +163,58 @@ class FacebookPublishingService:
             })
             session_id = start.get('upload_session_id')
             video_id = start.get('video_id')
-            offset = int(start.get('start_offset', 0))
-            end = int(start.get('end_offset', size))
-            if not session_id or not video_id or offset < 0 or end < offset or end > size:
+            if not session_id or not video_id:
                 raise PermanentPublishingError('Meta returned an invalid video upload session.')
-            with media.file.open('rb') as stream:
-                while offset < size:
-                    stream.seek(offset)
-                    chunk = stream.read(min(self.CHUNK_SIZE, size - offset))
-                    if not chunk:
-                        raise PermanentPublishingError('The private video file ended unexpectedly.')
-                    result = self._post(f'{page.page_id}/videos', {
-                        'access_token': token, 'upload_phase': 'transfer',
-                        'upload_session_id': session_id, 'start_offset': offset,
-                    }, file_field='video_file_chunk', file_chunk=chunk)
-                    next_offset = int(result.get('start_offset', end))
-                    next_end = int(result.get('end_offset', size))
-                    if next_offset <= offset or next_end < next_offset or next_end > size:
-                        raise PermanentPublishingError('Meta returned invalid video upload offsets.')
-                    offset, end = next_offset, next_end
+            upload_complete = start.get('skip_upload') is True
+            if 'start_offset' in start:
+                offset = self._offset(start['start_offset'], size)
+            else:
+                offset = None
+            if 'end_offset' in start:
+                end = self._offset(start['end_offset'], size)
+            else:
+                end = None
+            if upload_complete:
+                # Meta explicitly says the upload bytes are already present.
+                if offset is not None and end is not None and end < offset:
+                    raise PermanentPublishingError('Meta returned invalid skipped-upload offsets.')
+            elif offset == size and end == size and size > 0:
+                upload_complete = True
+            else:
+                if size <= 0 or offset != 0 or end is None or end <= offset:
+                    raise PermanentPublishingError('Meta returned invalid initial video upload offsets.')
+                with media.file.open('rb') as stream:
+                    while not upload_complete:
+                        requested_start, requested_end = offset, end
+                        stream.seek(requested_start)
+                        chunk = stream.read(requested_end - requested_start)
+                        if len(chunk) != requested_end - requested_start:
+                            raise PermanentPublishingError('The private video file ended before Meta requested range.')
+                        result = self._post(f'{page.page_id}/videos', {
+                            'access_token': token, 'upload_phase': 'transfer',
+                            'upload_session_id': session_id, 'start_offset': requested_start,
+                        }, file_field='video_file_chunk', file_chunk=chunk)
+                        if result.get('skip_upload') is True:
+                            skipped_start = None
+                            skipped_end = None
+                            if 'start_offset' in result:
+                                skipped_start = self._offset(result['start_offset'], size)
+                            if 'end_offset' in result:
+                                skipped_end = self._offset(result['end_offset'], size)
+                            if skipped_start is not None and skipped_end is not None and skipped_end < skipped_start:
+                                raise PermanentPublishingError('Meta returned invalid skipped-upload offsets.')
+                            upload_complete = True
+                            continue
+                        next_offset = self._offset(result.get('start_offset'), size)
+                        next_end = self._offset(result.get('end_offset'), size)
+                        if next_offset != requested_end:
+                            raise PermanentPublishingError('Meta did not confirm the requested video byte range.')
+                        if next_offset == size and next_end == size:
+                            upload_complete = True
+                        elif next_offset >= size or next_end <= next_offset:
+                            raise PermanentPublishingError('Meta returned repeated or invalid video upload offsets.')
+                        else:
+                            offset, end = next_offset, next_end
             try:
                 result = self._post(f'{page.page_id}/videos', {
                     'access_token': token, 'upload_phase': 'finish',
@@ -179,7 +226,8 @@ class FacebookPublishingService:
             except (TemporaryPublishingError, URLError, TimeoutError, OSError, ValueError, UnicodeDecodeError):
                 raise UncertainPublishingError('Meta may have received this video. Review Page activity before retrying.') from None
             external_id = result.get('video_id') or result.get('id')
-            if result.get('success') is not True or not isinstance(external_id, (str, int)):
+            if (result.get('success') is not True or isinstance(external_id, bool)
+                    or not isinstance(external_id, (str, int)) or not str(external_id).strip()):
                 raise PermanentPublishingError('Meta did not confirm video publication.')
             return {'confirmed': True, 'external_post_id': str(external_id)}
         except PermanentPublishingError:

@@ -127,7 +127,9 @@ export default function FacebookPagesPanel({ onSessionExpired, callbackStatus })
       <div className="facebook-security-note"><ShieldCheck size={16}/><span>Official Meta authorization. Publishing requires pages_show_list, pages_read_engagement, and pages_manage_posts. Tokens remain encrypted on the server.</span></div>
       {notice && <div className={`facebook-message ${noticeType}`} role="status">{noticeType === "error" ? <AlertCircle size={15}/> : <Check size={15}/>}<span>{notice}</span></div>}
       {error && <div className="facebook-message error" role="alert"><AlertCircle size={15}/><span>{error}</span></div>}
-      {connection?.publishing_enabled && connection.requires_reconnection && <div className="facebook-message error" role="status"><AlertCircle size={15}/><span>Reconnect Facebook and grant all publishing permissions before publishing.</span></div>}
+      {connection && !connection.publishing_enabled && <div className="facebook-message" role="status"><AlertCircle size={15}/><span>Publishing disabled on this server. Scheduled posts remain waiting.</span></div>}
+      {connection && !connected && !connection.requires_reconnection && <div className="facebook-message" role="status"><AlertCircle size={15}/><span>Facebook connection missing. Connect an account to authorize Page access.</span></div>}
+      {connection?.requires_reconnection && <div className="facebook-message error" role="status"><AlertCircle size={15}/><span>Required permissions missing. Reconnect Facebook and grant pages_show_list, pages_read_engagement, and pages_manage_posts.</span></div>}
 
       <div className="facebook-toolbar">
         {!connected ? (

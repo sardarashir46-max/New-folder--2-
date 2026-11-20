@@ -3,7 +3,7 @@ import { AlertCircle, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, Lo
 import { apiFetch, responseError } from "./api";
 
 const statusLabel = {
-  pending: "Pending", queued: "Queued", processing: "Processing",
+  pending: "Waiting to publish", queued: "Queued", processing: "Publishing",
   published: "Published", partial: "Partially published", failed: "Failed", review_required: "Review required", cancelled: "Cancelled",
 };
 
@@ -143,9 +143,13 @@ export default function PublishingCalendarPanel({ onSessionExpired }) {
     <section className="publishing-workspace">
       <article className="panel scheduling-panel" id="scheduled-post-form">
         <div className="panel-heading"><div><h3>{editingId ? "Edit scheduled post" : "Schedule a post"}</h3><p>Choose approved media, selected Pages, and a future time.</p></div>{editingId && <button className="subtle-button" onClick={resetForm}><X size={14}/> Stop editing</button>}</div>
-        <div className="publishing-disabled-note"><AlertCircle size={15}/><span>{connection?.publishing_enabled ? "Facebook publishing is enabled on this server. Posts publish only after the configured worker runs and Meta confirms success." : "Facebook publishing is disabled on this server. Scheduled posts remain pending and no attempt is made until an administrator enables publishing."}</span></div>
-        {connection?.requires_reconnection && <div className="library-message error" role="status"><AlertCircle size={15}/>Reconnect Facebook and approve pages_manage_posts and other required permissions.</div>}
-        {!connection?.connected && <div className="library-message error" role="status"><AlertCircle size={15}/>Connect a valid Facebook account before scheduling a post.</div>}
+        {connection && <div className="publishing-disabled-note"><AlertCircle size={15}/><span>
+          {!connection.publishing_enabled ? "Publishing disabled: scheduled posts remain waiting and no Meta request is made." :
+            connection.requires_reconnection ? "Required permissions missing: reconnect and grant pages_manage_posts and the other requested Page permissions." :
+              !connection.connected ? "Facebook connection missing: connect an account before publishing." :
+                !connection.publishing_configured ? "Meta server configuration is incomplete. Publishing cannot start until credentials and token encryption are configured." :
+                  "Publishing enabled: posts move to Publishing when a worker starts them; Published is shown only after Meta confirms a video ID."}
+        </span></div>}
         <form className="schedule-form" onSubmit={submitPost}>
           <label>Approved video<select value={mediaId} onChange={event => updateFormValue(setMediaId, event.target.value)} required disabled={!approvedMedia.length}><option value="">Select media…</option>{approvedMedia.map(item => <option key={item.id} value={item.id}>{item.title} · {item.rights_status}</option>)}</select></label>
           <label>Post caption<textarea value={caption} onChange={event => updateFormValue(setCaption, event.target.value)} rows={3} placeholder="Write a caption for the selected Pages" /></label>
@@ -153,7 +157,7 @@ export default function PublishingCalendarPanel({ onSessionExpired }) {
           <label>Publish date and time<input type="datetime-local" value={scheduledFor} onChange={event => updateFormValue(setScheduledFor, event.target.value)} required /></label>
           <fieldset className="page-target-picker"><legend>Selected Facebook Pages</legend>
             {selectedPages.length === 0 ? <span className="muted">No selected Pages. Select Pages in Facebook Pages first.</span> : selectedPages.map(page => (
-              <label key={page.id}><input type="checkbox" checked={pageIds.includes(page.id)} onChange={() => togglePage(page.id)}/><span>{page.name}</span></label>
+              <label key={page.id}><input type="checkbox" checked={pageIds.includes(page.id)} disabled={!page.can_create_content} onChange={() => togglePage(page.id)}/><span>{page.name}{!page.can_create_content ? " · CREATE_CONTENT missing" : ""}</span></label>
             ))}
           </fieldset>
           <div className="schedule-form-actions"><button className="primary-button" type="submit" disabled={saving || !mediaId || !pageIds.length || !connection?.connected}>{saving ? <LoaderCircle size={15} className="spin"/> : editingId ? <Check size={15}/> : <Plus size={15}/>} {saving ? "Saving…" : editingId ? "Save changes" : "Add to calendar"}</button>{editingId && <button type="button" className="subtle-button" onClick={resetForm}>Cancel edit</button>}</div>

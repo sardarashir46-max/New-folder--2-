@@ -81,7 +81,14 @@ The API routes are:
 
 Creating a scheduled post requires ready media declared Owned or Authorized, a future timezone-aware date/time, and one or more available, selected Pages from the user's currently connected Facebook account. Per-Page targets and publishing attempts are stored separately. Edits are limited to pending posts; cancellation preserves the schedule and history. Deleting media or withdrawing its approval cancels pending/queued schedules that depend on it.
 
-Celery Beat queues due posts using an atomic database claim, and workers record per-Page attempts. Publishing dispatch is **off by default**. Keep `FACEBOOK_PUBLISHING_ENABLED=False` until the Meta app, required access, encrypted Page tokens, private media storage, Redis and workers are configured. With publishing disabled, due posts stay Pending and no attempts are created. Enable it explicitly with `FACEBOOK_PUBLISHING_ENABLED=True`; `PUBLISHING_DISPATCH_ENABLED` can independently pause dispatch. Workers recheck rights, ownership, Page task and token. Temporary errors retry with exponential backoff; uncertain finish responses or stale processing targets become Review required so they are not automatically duplicated. Review Page activity before manually taking further action. There is no automatic retry control for review-required posts.
+Celery Beat queues due posts using an atomic database claim, and workers record per-Page attempts. Publishing dispatch is **off by default**. Keep both switches off while configuring or whenever you need a guaranteed pause:
+
+```dotenv
+FACEBOOK_PUBLISHING_ENABLED=False
+PUBLISHING_DISPATCH_ENABLED=False
+```
+
+With publishing disabled, due posts stay Pending and no attempts are created. Before enabling, configure the Meta app and callback above, obtain the required permission access, reconnect Pages, verify `CREATE_CONTENT`, and ensure private media storage and Redis/Celery workers are ready. Then set `FACEBOOK_PUBLISHING_ENABLED=True` and `PUBLISHING_DISPATCH_ENABLED=True`; either switch set to `False` pauses the publishing flow. `PUBLISHING_DISPATCH_INTERVAL_SECONDS`, `PUBLISHING_DISPATCH_STALE_SECONDS`, and `PUBLISHING_MAX_RETRIES` control scheduling and retries. Workers recheck rights, Page ownership/access, Page task and token. Temporary errors retry with exponential backoff; uncertain finish responses or stale processing targets become Review required so they are not automatically duplicated. Review Page activity before manually taking further action. There is no automatic retry control for review-required posts.
 
 Start Redis and then run these from `backend/` in separate terminals:
 

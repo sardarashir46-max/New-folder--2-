@@ -1,4 +1,6 @@
 import tempfile
+import json
+import re
 import uuid
 from io import BytesIO
 from datetime import timedelta
@@ -417,26 +419,153 @@ class ContentLibraryAndSchedulingTests(APITestCase):
         target = ScheduledPost.objects.get(pk=created.data['id']).targets.get()
         calls = []
         adapter = FacebookPublishingService()
-        adapter.CHUNK_SIZE = 8
         self.publisher_safety.stop()
 
-        def fake_post(endpoint, fields, file_field=None, file_chunk=None, offset=None):
-            calls.append((fields.copy(), file_field, file_chunk))
-            if fields.get('upload_phase') == 'start':
-                return {'upload_session_id': 'session-1', 'video_id': 'video-1', 'start_offset': '0', 'end_offset': str(media.file_size)}
-            if fields.get('upload_phase') == 'transfer':
-                next_offset = int(fields['start_offset']) + len(file_chunk)
-                return {'start_offset': str(next_offset), 'end_offset': str(media.file_size)}
-            return {'success': True, 'video_id': 'video-1'}
+        def multipart_fields(request):
+            boundary = request.headers['Content-type'].split('boundary=', 1)[1].encode()
+            fields = {}
+            chunk = None
+            for part in request.data.split(b'--' + boundary):
+                if b'Content-Disposition:' not in part:
+                    continue
+                header, payload = part.split(b'\r\n\r\n', 1)
+                payload = payload.rsplit(b'\r\n', 1)[0]
+                match = re.search(rb'name="([^"]+)"', header)
+                if match:
+                    name = match.group(1).decode()
+                    if name == 'video_file_chunk':
+                        chunk = payload
+                    else:
+                        fields[name] = payload.decode()
+            return fields, chunk
 
-        with patch.object(adapter, '_post', side_effect=fake_post):
+        transfer_windows = [(0, 5), (5, 11), (11, media.file_size)]
+
+        def fake_urlopen(request, timeout):
+            fields, chunk = multipart_fields(request)
+            phase = fields['upload_phase']
+            calls.append((request.full_url, fields, chunk))
+            if phase == 'start':
+                response = {'upload_session_id': 'session-1', 'video_id': 'video-1', 'start_offset': '0', 'end_offset': '5'}
+            elif phase == 'transfer':
+                start, end = transfer_windows.pop(0)
+                self.assertEqual(int(fields['start_offset']), start)
+                self.assertEqual(len(chunk), end - start)
+                next_offset = end
+                next_end = transfer_windows[0][1] if transfer_windows else media.file_size
+                response = {'start_offset': str(next_offset), 'end_offset': str(next_end)}
+            else:
+                response = {'success': True, 'video_id': 'video-1'}
+            return BytesIO(json.dumps(response).encode())
+
+        with patch('library.services.urlopen', side_effect=fake_urlopen):
             result = adapter.publish(target, str(target.idempotency_key))
 
         self.assertEqual(result, {'confirmed': True, 'external_post_id': 'video-1'})
-        self.assertEqual(calls[0][0]['upload_phase'], 'start')
-        self.assertGreater(sum(call[1] == 'video_file_chunk' for call in calls), 1)
-        self.assertEqual(calls[-1][0]['upload_phase'], 'finish')
-        self.assertIn('A post caption', calls[-1][0]['description'])
+        self.assertEqual([call[1]['upload_phase'] for call in calls], ['start', 'transfer', 'transfer', 'transfer', 'finish'])
+        self.assertTrue(all(call[0].startswith('https://graph-video.facebook.com/v27.0/') for call in calls))
+        with media.file.open('rb') as stored_file:
+            stored_bytes = stored_file.read()
+        self.assertEqual([call[2] for call in calls if call[2] is not None], [
+            stored_bytes[:5], stored_bytes[5:11], stored_bytes[11:],
+        ])
+        self.assertIn('A post caption', calls[-1][1]['description'])
+
+    def test_invalid_and_repeated_meta_offsets_stop_without_finish(self):
+        from .services import PermanentPublishingError
+
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        target = ScheduledPost.objects.get(pk=created.data['id']).targets.get()
+        adapter = FacebookPublishingService()
+        self.publisher_safety.stop()
+        invalid_starts = [
+            {'start_offset': '-1', 'end_offset': '5'},
+            {'start_offset': '0', 'end_offset': '0'},
+            {'start_offset': '0', 'end_offset': str(media.file_size + 1)},
+        ]
+        for offsets in invalid_starts:
+            with self.subTest(offsets=offsets):
+                start = {'upload_session_id': 'session', 'video_id': 'video', **offsets}
+                with patch.object(adapter, '_post', return_value=start) as send:
+                    with self.assertRaises(PermanentPublishingError):
+                        adapter.publish(target, 'key')
+                    self.assertEqual(send.call_count, 1)
+
+        responses = [
+            {'upload_session_id': 'session', 'video_id': 'video', 'start_offset': '0', 'end_offset': '5'},
+            {'start_offset': '0', 'end_offset': '5'},  # repeated start: range was not acknowledged
+        ]
+        with patch.object(adapter, '_post', side_effect=responses) as send:
+            with self.assertRaises(PermanentPublishingError):
+                adapter.publish(target, 'key')
+        self.assertEqual(send.call_count, 2)
+
+    def test_skip_upload_finishes_without_transfer(self):
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        target = ScheduledPost.objects.get(pk=created.data['id']).targets.get()
+        adapter = FacebookPublishingService()
+        self.publisher_safety.stop()
+        responses = [
+            {'upload_session_id': 'session', 'video_id': 'video', 'skip_upload': True},
+            {'success': True, 'video_id': 'video'},
+        ]
+        with patch.object(adapter, '_post', side_effect=responses) as send:
+            self.assertEqual(adapter.publish(target, 'key')['external_post_id'], 'video')
+        self.assertEqual([call.args[1]['upload_phase'] for call in send.call_args_list], ['start', 'finish'])
+
+    def test_finish_timeout_is_uncertain_and_not_automatically_retryable(self):
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        target = ScheduledPost.objects.get(pk=created.data['id']).targets.get()
+        adapter = FacebookPublishingService()
+        self.publisher_safety.stop()
+        responses = [
+            {'upload_session_id': 'session', 'video_id': 'video', 'start_offset': '0', 'end_offset': str(media.file_size)},
+            {'start_offset': str(media.file_size), 'end_offset': str(media.file_size)},
+            URLError('token should never escape'),
+        ]
+        with patch.object(adapter, '_post', side_effect=responses) as send:
+            with self.assertRaises(UncertainPublishingError) as caught:
+                adapter.publish(target, 'key')
+        self.assertNotIn('token should never escape', str(caught.exception))
+        self.assertEqual(send.call_args_list[-1].args[1]['upload_phase'], 'finish')
+
+    def test_page_token_missing_prevents_meta_request(self):
+        from .services import PermanentPublishingError
+
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        target = ScheduledPost.objects.get(pk=created.data['id']).targets.get()
+        page.set_page_access_token('')
+        page.save(update_fields=['page_access_token_encrypted'])
+        adapter = FacebookPublishingService()
+        self.publisher_safety.stop()
+        with override_settings(PUBLISHING_ENABLED=True):
+            with patch.object(adapter, '_post') as send:
+                with self.assertRaises(PermanentPublishingError):
+                    adapter.publish(target, 'key')
+        send.assert_not_called()
+
+    def test_worker_never_marks_success_without_confirmed_video_id(self):
+        media = self.make_media()
+        page = self.make_page()
+        created = self.schedule(media=media, pages=[page])
+        post = ScheduledPost.objects.get(pk=created.data['id'])
+        post.scheduled_for = timezone.now() - timedelta(seconds=1)
+        post.save(update_fields=['scheduled_for'])
+        dispatch_due_scheduled_posts.run()
+        with patch('library.tasks.FacebookPublishingService.publish', return_value={'confirmed': True, 'external_post_id': ''}):
+            process_scheduled_post.apply(args=(post.pk,), task_id=f'scheduled-post-{post.pk}')
+        post.refresh_from_db()
+        self.assertEqual(post.status, ScheduledPost.Status.FAILED)
+        self.assertEqual(post.targets.get().status, ScheduledPostTarget.Status.FAILED)
+        self.assertFalse(post.targets.get().external_post_id)
 
     def test_worker_records_uncertain_meta_finish_as_review_required(self):
         media = self.make_media()

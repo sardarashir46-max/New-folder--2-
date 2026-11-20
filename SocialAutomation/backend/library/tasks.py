@@ -185,9 +185,9 @@ def process_scheduled_post(self, post_id):
                 if authorization_error:
                     raise PermanentPublishingError(authorization_error)
                 result = publisher.publish(target, str(target.idempotency_key))
-                # The current adapter always raises. A future adapter must return an explicit Meta ID.
                 external_id = result.get('external_post_id') if isinstance(result, dict) and result.get('confirmed') is True else None
-                if not external_id:
+                if (isinstance(external_id, bool) or not isinstance(external_id, (str, int))
+                        or not str(external_id).strip() or str(external_id).strip() == '0'):
                     raise PermanentPublishingError('Meta did not confirm publication. No success was recorded.')
                 with transaction.atomic():
                     target.status = ScheduledPostTarget.Status.PUBLISHED
