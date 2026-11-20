@@ -51,6 +51,8 @@ INSTALLED_APPS = [
     'rest_framework',
     'channels',
     'accounts',
+    'facebook',
+    'library',
 ]
 
 MIDDLEWARE = [
@@ -143,6 +145,67 @@ REST_FRAMEWORK = {
         'login_username': '5/minute',
     },
 }
+
+# Celery Beat periodically dispatches one lightweight task per enabled channel.
+# The worker, not a web request, performs all YouTube API calls.
+YOUTUBE_MONITORING_ENABLED = os.environ.get(
+    'YOUTUBE_MONITORING_ENABLED', 'True'
+).lower() in ('true', '1', 'yes')
+YOUTUBE_MONITOR_INTERVAL_SECONDS = max(
+    60,
+    int(os.environ.get('YOUTUBE_MONITOR_INTERVAL_SECONDS', '900')),
+)
+CELERY_BROKER_URL = os.environ.get(
+    'CELERY_BROKER_URL',
+    os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/0'),
+)
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_DEFAULT_QUEUE = 'socialautomation'
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_BEAT_SCHEDULE = {}
+if YOUTUBE_MONITORING_ENABLED:
+    CELERY_BEAT_SCHEDULE['enqueue-enabled-youtube-channel-checks'] = {
+        'task': 'channels.tasks.enqueue_enabled_channel_checks',
+        'schedule': YOUTUBE_MONITOR_INTERVAL_SECONDS,
+    }
+
+PUBLISHING_ENABLED = os.environ.get('FACEBOOK_PUBLISHING_ENABLED', 'False').lower() in ('true', '1', 'yes')
+PUBLISHING_DISPATCH_ENABLED = PUBLISHING_ENABLED and os.environ.get('PUBLISHING_DISPATCH_ENABLED', 'True').lower() in ('true', '1', 'yes')
+PUBLISHING_DISPATCH_INTERVAL_SECONDS = max(10, int(os.environ.get('PUBLISHING_DISPATCH_INTERVAL_SECONDS', '30')))
+# Keep queue recovery later than the maximum Celery retry backoff (one hour).
+PUBLISHING_DISPATCH_STALE_SECONDS = max(3660, int(os.environ.get('PUBLISHING_DISPATCH_STALE_SECONDS', '3900')))
+PUBLISHING_MAX_RETRIES = max(0, int(os.environ.get('PUBLISHING_MAX_RETRIES', '4')))
+if PUBLISHING_DISPATCH_ENABLED:
+    CELERY_BEAT_SCHEDULE['dispatch-due-scheduled-posts'] = {
+        'task': 'library.tasks.dispatch_due_scheduled_posts',
+        'schedule': PUBLISHING_DISPATCH_INTERVAL_SECONDS,
+    }
+    CELERY_BEAT_SCHEDULE['recover-stale-publishing-targets'] = {
+        'task': 'library.tasks.recover_stale_processing_targets',
+        'schedule': PUBLISHING_DISPATCH_STALE_SECONDS,
+    }
+
+MEDIA_ROOT = Path(os.environ.get('SOCIALAUTOMATION_MEDIA_ROOT', BASE_DIR / 'uploads')).resolve()
+MEDIA_MAX_UPLOAD_BYTES = max(1, int(os.environ.get('MEDIA_MAX_UPLOAD_MB', '500'))) * 1024 * 1024
+
+# Keep uploads private: media is streamed through an authenticated API view and
+# Facebook workers read it directly from private storage only when explicitly enabled.
+
+# Facebook Login and Graph API are configured per environment. App credentials
+# are intentionally optional at startup so the rest of Django remains usable.
+FACEBOOK_APP_ID = os.environ.get('FACEBOOK_APP_ID', '').strip()
+FACEBOOK_APP_SECRET = os.environ.get('FACEBOOK_APP_SECRET', '').strip()
+FACEBOOK_REDIRECT_URI = os.environ.get(
+    'FACEBOOK_REDIRECT_URI',
+    'http://localhost:8000/api/facebook/oauth/callback/',
+).strip()
+FACEBOOK_FRONTEND_URL = os.environ.get(
+    'FACEBOOK_FRONTEND_URL',
+    'http://localhost:5173',
+).strip()
+FACEBOOK_GRAPH_API_VERSION = os.environ.get('FACEBOOK_GRAPH_API_VERSION', 'v27.0').strip()
+FACEBOOK_TOKEN_ENCRYPTION_KEY = os.environ.get('FACEBOOK_TOKEN_ENCRYPTION_KEY', '').strip()
+FACEBOOK_LOGIN_SCOPES = ('pages_show_list', 'pages_read_engagement', 'pages_manage_posts')
 
 # Login throttles use Django's cache. LocMem is convenient for one local server;
 # multi-worker deployments should point these settings at a shared cache service.

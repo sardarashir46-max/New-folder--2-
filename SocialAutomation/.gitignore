@@ -6,6 +6,7 @@ venv/
 .env
 *.sqlite3
 media/
+backend/uploads/
 staticfiles/
 
 # Node

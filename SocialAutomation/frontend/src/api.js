@@ -1,11 +1,15 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 
+export function apiUrl(path) {
+  return `${API_BASE_URL}${path}`;
+}
+
 export async function apiFetch(path, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   const headers = new Headers(options.headers || {});
 
   if (!["GET", "HEAD", "OPTIONS", "TRACE"].includes(method)) {
-    const csrfResponse = await fetch(`${API_BASE_URL}/api/auth/csrf/`, {
+    const csrfResponse = await fetch(apiUrl("/api/auth/csrf/"), {
       credentials: "include",
       signal: options.signal,
     });
@@ -15,7 +19,7 @@ export async function apiFetch(path, options = {}) {
     headers.set("X-CSRFToken", csrfToken);
   }
 
-  return fetch(`${API_BASE_URL}${path}`, {
+  return fetch(apiUrl(path), {
     ...options,
     method,
     headers,
@@ -35,5 +39,7 @@ export async function responseError(response) {
     const firstError = Object.values(data.errors).flat()[0];
     if (firstError) return firstError;
   }
+  const firstFieldError = Object.values(data).flat(3).find(value => typeof value === "string" && value.length);
+  if (firstFieldError) return firstFieldError;
   return "The request could not be completed. Please try again.";
 }
