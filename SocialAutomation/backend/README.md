@@ -68,3 +68,19 @@ Keep the encryption key stable and secret: stored Facebook user and Page tokens 
 The integration currently requests only `pages_show_list` and `pages_read_engagement`, then lists authorized Pages and lets the user select/deselect them. Tokens are encrypted at rest and never included in API responses. Disconnect attempts to revoke only the permissions requested by this integration, then removes local token/Page records even if Meta is unavailable. A Page selection is a user preference, not proof of ownership or redistribution rights.
 
 No publishing action is implemented. Future publishing needs Meta's supported Page publishing permissions and review, Page task authorization, explicit user intent, and content rights. Do not request `pages_manage_posts` until that separate milestone. The Graph API version is configurable with `FACEBOOK_GRAPH_API_VERSION` and defaults to `v27.0`; Meta versions and app-review requirements change over time.
+
+## Content library and publishing scheduler foundation
+
+Run migrations with `py manage.py migrate`. Video files are stored under `SOCIALAUTOMATION_MEDIA_ROOT` (default `backend/uploads`) and are not served as public static files. The authenticated file endpoint checks ownership before streaming. `MEDIA_MAX_UPLOAD_MB` defaults to 500 MB. Uploads must have a supported extension and matching MP4/M4V, QuickTime MOV, WebM, Matroska MKV, or AVI container signature; the browser-supplied MIME type and filename are not trusted. This foundation checks the container signature but does not transcode, scan for malware, or verify rights. New uploads start as `pending_review`; an Owner/Authorized status is a user declaration recorded with a timestamp and account, not independent verification.
+
+The API routes are:
+
+- `GET/POST /api/library/media/`, `GET/PATCH/DELETE /api/library/media/{id}/`, `GET /api/library/media/{id}/file/`, `PATCH /api/library/media/{id}/rights/`.
+- `GET/POST /api/publishing/posts/`, `GET/PATCH/DELETE /api/publishing/posts/{id}/`, and `POST /api/publishing/posts/{id}/cancel/`.
+- `GET /api/publishing/history/` and `GET /api/dashboard/summary/`.
+
+Creating a scheduled post requires ready media declared Owned or Authorized, a future timezone-aware date/time, and one or more available, selected Pages from the user's currently connected Facebook account. Per-Page targets and publishing attempts are stored separately. Edits are limited to pending posts; cancellation preserves the schedule and history. Deleting media or withdrawing its approval cancels pending/queued schedules that depend on it.
+
+Celery Beat queues due posts using an atomic database claim, and workers record per-Page attempts with an idempotency key. Start `py -m celery -A config worker --pool=solo --loglevel=INFO` and `py -m celery -A config beat --loglevel=INFO` from `backend/` alongside Redis. Tune `PUBLISHING_DISPATCH_INTERVAL_SECONDS`, `PUBLISHING_DISPATCH_STALE_SECONDS`, and `PUBLISHING_MAX_RETRIES` in `.env`. The queue recovery timeout is kept above the maximum one-hour retry backoff so it does not bypass retry delays. The publishing service is a safe placeholder that always fails with “publishing is not enabled”; it makes no Meta publish request and cannot mark a post published. No additional Meta permissions are requested in this milestone.
+
+From `frontend/`, run `npm install` and `npm run dev`. The Media Library, Publishing Calendar, and Activity Logs use the authenticated API and retain the existing dashboard styling. The calendar shows scheduling and attempt outcomes; it does not send posts to Facebook.

@@ -39,5 +39,7 @@ export async function responseError(response) {
     const firstError = Object.values(data.errors).flat()[0];
     if (firstError) return firstError;
   }
+  const firstFieldError = Object.values(data).flat(3).find(value => typeof value === "string" && value.length);
+  if (firstFieldError) return firstFieldError;
   return "The request could not be completed. Please try again.";
 }

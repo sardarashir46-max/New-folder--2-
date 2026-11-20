@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'channels',
     'accounts',
     'facebook',
+    'library',
 ]
 
 MIDDLEWARE = [
@@ -161,16 +162,29 @@ CELERY_BROKER_URL = os.environ.get(
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_DEFAULT_QUEUE = 'socialautomation'
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
-CELERY_BEAT_SCHEDULE = (
-    {
-        'enqueue-enabled-youtube-channel-checks': {
-            'task': 'channels.tasks.enqueue_enabled_channel_checks',
-            'schedule': YOUTUBE_MONITOR_INTERVAL_SECONDS,
-        },
+CELERY_BEAT_SCHEDULE = {}
+if YOUTUBE_MONITORING_ENABLED:
+    CELERY_BEAT_SCHEDULE['enqueue-enabled-youtube-channel-checks'] = {
+        'task': 'channels.tasks.enqueue_enabled_channel_checks',
+        'schedule': YOUTUBE_MONITOR_INTERVAL_SECONDS,
     }
-    if YOUTUBE_MONITORING_ENABLED
-    else {}
-)
+
+PUBLISHING_DISPATCH_ENABLED = os.environ.get('PUBLISHING_DISPATCH_ENABLED', 'True').lower() in ('true', '1', 'yes')
+PUBLISHING_DISPATCH_INTERVAL_SECONDS = max(10, int(os.environ.get('PUBLISHING_DISPATCH_INTERVAL_SECONDS', '30')))
+# Keep queue recovery later than the maximum Celery retry backoff (one hour).
+PUBLISHING_DISPATCH_STALE_SECONDS = max(3660, int(os.environ.get('PUBLISHING_DISPATCH_STALE_SECONDS', '3900')))
+PUBLISHING_MAX_RETRIES = max(0, int(os.environ.get('PUBLISHING_MAX_RETRIES', '4')))
+if PUBLISHING_DISPATCH_ENABLED:
+    CELERY_BEAT_SCHEDULE['dispatch-due-scheduled-posts'] = {
+        'task': 'library.tasks.dispatch_due_scheduled_posts',
+        'schedule': PUBLISHING_DISPATCH_INTERVAL_SECONDS,
+    }
+
+MEDIA_ROOT = Path(os.environ.get('SOCIALAUTOMATION_MEDIA_ROOT', BASE_DIR / 'uploads')).resolve()
+MEDIA_MAX_UPLOAD_BYTES = max(1, int(os.environ.get('MEDIA_MAX_UPLOAD_MB', '500'))) * 1024 * 1024
+
+# Keep the uploads private: media is streamed through an authenticated API view.
+# Celery tasks only queue due posts; actual Facebook publishing is disabled in this milestone.
 
 # Facebook Login and Graph API are configured per environment. App credentials
 # are intentionally optional at startup so the rest of Django remains usable.

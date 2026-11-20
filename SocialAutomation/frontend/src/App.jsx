@@ -1,7 +1,10 @@
 import React from 'react';
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import AuthScreen from "./AuthScreen";
 import FacebookPagesPanel from "./FacebookPagesPanel";
+import MediaLibraryPanel from "./MediaLibraryPanel";
+import PublishingCalendarPanel from "./PublishingCalendarPanel";
+import PublishingHistoryPanel from "./PublishingHistoryPanel";
 import YouTubeChannelsPanel from "./YouTubeChannelsPanel";
 import { apiFetch, responseError } from "./api";
 import {
@@ -21,18 +24,12 @@ const navItems = [
   { label: "Activity logs", icon: Activity },
 ];
 
-const upcoming = [
-  { title: "Weekly highlights — Episode 08", page: "BreakHoops", time: "Today, 10:30 AM", type: "Video", status: "Scheduled" },
-  { title: "Top moments of the week", page: "Buckets Daily", time: "Today, 2:00 PM", type: "Reel", status: "Scheduled" },
-  { title: "Behind the scenes", page: "Wild Bite", time: "Today, 6:45 PM", type: "Reel", status: "In review" },
-];
-
 function StatCard({ label, value, change, icon: Icon, tone }) {
   return (
     <article className="stat-card">
       <div className="stat-top"><span>{label}</span><span className={`stat-icon ${tone}`}><Icon size={18} /></span></div>
       <div className="stat-value">{value}</div>
-      <div className="stat-foot"><span className="trend"><ArrowUpRight size={14} /> {change}</span><span>vs. last 30 days</span></div>
+      <div className="stat-foot"><span className="trend"><ArrowUpRight size={14} /> {change}</span></div>
     </article>
   );
 }
@@ -42,6 +39,9 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
   const [mobileOpen, setMobileOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [notice, setNotice] = useState("");
+  const [summary, setSummary] = useState(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [summaryError, setSummaryError] = useState("");
   const title = active === "Overview" ? "Command center" : active;
   const descriptions = {
     "Overview": "Your content operations, all in one place.",
@@ -56,6 +56,24 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
     setNotice(message);
     window.setTimeout(() => setNotice(""), 2800);
   };
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function loadSummary() {
+      try {
+        const response = await apiFetch("/api/dashboard/summary/", { signal: controller.signal });
+        if (response.status === 401 || response.status === 403) onSessionExpired();
+        if (!response.ok) throw new Error(await responseError(response));
+        setSummary(await response.json());
+      } catch (error) {
+        if (error.name !== "AbortError") setSummaryError(error.message || "Dashboard totals are unavailable.");
+      } finally {
+        if (!controller.signal.aborted) setSummaryLoading(false);
+      }
+    }
+    loadSummary();
+    return () => controller.abort();
+  }, [onSessionExpired]);
 
   return (
     <div className="app-shell">
@@ -88,7 +106,7 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
             <div className="usage-heading"><Sparkles size={15}/><strong>Getting started</strong></div>
             <p>Connect your accounts to start building your publishing workflow.</p>
             <div className="progress-track"><span /></div>
-            <small>0 of 2 accounts connected</small>
+          <small>{summaryLoading ? "Checking connected accounts…" : `${Number(Boolean(summary?.youtube_connected)) + Number(Boolean(summary?.facebook_connected))} of 2 platforms connected`}</small>
           </div>
           <button className="nav-item" onClick={() => showNotice("Settings will be available in a later phase.")}><Settings2 size={18}/><span>Settings</span></button>
           <button className="nav-item" onClick={() => showNotice("Help center is coming soon.")}><CircleHelp size={18}/><span>Help & support</span></button>
@@ -123,19 +141,20 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
               </section>
 
               <section className="stats-grid">
-                <StatCard label="Connected channels" value="0" change="Get started" icon={Youtube} tone="red"/>
-                <StatCard label="Facebook Pages" value="0" change="Get started" icon={Facebook} tone="blue"/>
-                <StatCard label="Scheduled posts" value="0" change="No posts yet" icon={CalendarDays} tone="violet"/>
-                <StatCard label="Published this month" value="0" change="No activity yet" icon={CheckCircle2} tone="green"/>
+                <StatCard label="YouTube channels" value={summary?.youtube_channels ?? (summaryLoading ? "…" : "0")} change="In your workspace" icon={Youtube} tone="red"/>
+                <StatCard label="Selected Facebook Pages" value={summary?.facebook_pages ?? (summaryLoading ? "…" : "0")} change="Ready for scheduling" icon={Facebook} tone="blue"/>
+                <StatCard label="Scheduled posts" value={summary?.scheduled_posts ?? (summaryLoading ? "…" : "0")} change="Pending or processing" icon={CalendarDays} tone="violet"/>
+                <StatCard label="Published this month" value={summary?.published_this_month ?? (summaryLoading ? "…" : "0")} change="Confirmed by Meta" icon={CheckCircle2} tone="green"/>
               </section>
+              {summaryError && <div className="library-message error" role="alert">{summaryError}</div>}
 
               <section className="content-grid">
                 <article className="panel upcoming-panel">
                   <div className="panel-heading"><div><h3>Upcoming publishing</h3><p>Your next scheduled content will appear here.</p></div><button className="text-button" onClick={() => setActive("Publishing calendar")}>View calendar <ArrowUpRight size={15}/></button></div>
-                  <div className="empty-state"><div className="empty-icon"><CalendarDays size={23}/></div><strong>Your calendar is clear</strong><span>Connect an account and add media to plan your first post.</span><button className="subtle-button" onClick={() => setActive("Publishing calendar")}>Open calendar</button></div>
+                  {summaryLoading ? <div className="empty-state"><div className="empty-icon"><Clock3 size={23}/></div><strong>Loading your schedule…</strong></div> : summary?.upcoming_posts?.length ? <div className="overview-upcoming-list">{summary.upcoming_posts.map(post => <div className="overview-upcoming-row" key={post.id}><div><strong>{post.title}</strong><span>{post.pages.join(", ") || "No Page targets"}</span></div><time>{new Date(post.scheduled_for).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</time></div>)}<button className="subtle-button" onClick={() => setActive("Publishing calendar")}>Open calendar</button></div> : <div className="empty-state"><div className="empty-icon"><CalendarDays size={23}/></div><strong>Your calendar is clear</strong><span>Approved media and selected Pages are needed to schedule content.</span><button className="subtle-button" onClick={() => setActive("Publishing calendar")}>Open calendar</button></div>}
                 </article>
                 <article className="panel setup-panel">
-                  <div className="panel-heading"><div><h3>Workspace setup</h3><p>Two quick steps to get moving.</p></div><span className="setup-count">0/2</span></div>
+                  <div className="panel-heading"><div><h3>Workspace setup</h3><p>Two quick steps to get moving.</p></div><span className="setup-count">{summaryLoading ? "…/2" : `${Number(Boolean(summary?.youtube_connected)) + Number(Boolean(summary?.facebook_connected))}/2`}</span></div>
                   <div className="setup-step"><div className="step-icon red-soft"><Youtube size={18}/></div><div><strong>Connect YouTube</strong><span>Bring in channel details and video metadata.</span></div><button onClick={() => setActive("YouTube channels")} aria-label="Connect YouTube"><ArrowUpRight size={17}/></button></div>
                   <div className="setup-step"><div className="step-icon blue-soft"><Facebook size={18}/></div><div><strong>Connect Facebook</strong><span>Choose the Pages you are authorized to manage.</span></div><button onClick={() => setActive("Facebook Pages")} aria-label="Connect Facebook"><ArrowUpRight size={17}/></button></div>
                   <div className="secure-note"><ShieldCheck size={15}/> Account connections will use official authorization flows.</div>
@@ -155,6 +174,12 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
               onNotice={showNotice}
               callbackStatus={facebookCallbackStatus}
             />
+          ) : active === "Media library" ? (
+            <MediaLibraryPanel onSessionExpired={onSessionExpired} />
+          ) : active === "Publishing calendar" ? (
+            <PublishingCalendarPanel onSessionExpired={onSessionExpired} />
+          ) : active === "Activity logs" ? (
+            <PublishingHistoryPanel onSessionExpired={onSessionExpired} />
           ) : (
             <section className="panel section-placeholder">
               <div className="placeholder-icon">{active === "YouTube channels" ? <Youtube/> : active === "Facebook Pages" ? <Facebook/> : active === "Media library" ? <FileVideo2/> : active === "Publishing calendar" ? <CalendarDays/> : <Activity/>}</div>
@@ -163,7 +188,7 @@ function Dashboard({ user, onLogout, onSessionExpired, logoutLoading, logoutErro
               <button className="primary-button" onClick={() => showNotice("This feature is planned for the next milestone.")}><Plus size={16}/> Get started</button>
             </section>
           )}
-          <footer className="footer"><span>© 2026 SocialAutomation</span><span><span className="footer-status"/> All systems operational <span className="footer-divider">·</span> Phase 1 preview</span></footer>
+          <footer className="footer"><span>© 2026 SocialAutomation</span><span><span className="footer-status"/> Workspace API connected <span className="footer-divider">·</span> Milestone 3 foundation</span></footer>
         </div>
       </main>
       {notice && <div className="toast"><CheckCircle2 size={17}/>{notice}</div>}
@@ -179,6 +204,7 @@ function App() {
   const [logoutLoading, setLogoutLoading] = useState(false);
   const [logoutError, setLogoutError] = useState("");
   const [facebookCallbackStatus] = useState(() => new URLSearchParams(window.location.search).get("facebook"));
+  const handleSessionExpired = useCallback(() => setUser(null), []);
 
   async function checkSession(signal) {
     setCheckingSession(true);
@@ -229,7 +255,7 @@ function App() {
   if (sessionError) {
     return <main className="auth-shell"><div className="auth-card auth-unavailable"><h1>Can't reach your workspace</h1><p>{sessionError}</p><button className="primary-button" onClick={() => checkSession()}>Try again</button></div></main>;
   }
-  return user ? <Dashboard user={user} onLogout={handleLogout} onSessionExpired={() => setUser(null)} logoutLoading={logoutLoading} logoutError={logoutError} facebookCallbackStatus={facebookCallbackStatus} /> : <AuthScreen onAuthenticated={setUser} />;
+  return user ? <Dashboard user={user} onLogout={handleLogout} onSessionExpired={handleSessionExpired} logoutLoading={logoutLoading} logoutError={logoutError} facebookCallbackStatus={facebookCallbackStatus} /> : <AuthScreen onAuthenticated={setUser} />;
 }
 
 export default App;
